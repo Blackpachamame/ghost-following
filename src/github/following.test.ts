@@ -84,5 +84,48 @@ describe("getFollowing", () => {
     );
     assert.equal(requestCount, 2);
   });
-});
 
+  it("retries only the failed pagination page without restarting earlier pages", async () => {
+    const requests = new Map<string, number>();
+    const delays: number[] = [];
+    const fetchMock = (async (input: string | URL | Request) => {
+      const url = String(input);
+      requests.set(url, (requests.get(url) ?? 0) + 1);
+      if (url.includes("/following?")) {
+        return new Response(JSON.stringify([apiAccount(0)]), {
+          status: 200,
+          headers: { link: '<https://api.github.com/page-2>; rel="next"' },
+        });
+      }
+      if (url.endsWith("/page-2") && requests.get(url) === 1) {
+        return new Response("", { status: 502 });
+      }
+      if (url.endsWith("/page-2")) {
+        return new Response(JSON.stringify([apiAccount(1)]), {
+          status: 200,
+          headers: { link: '<https://api.github.com/page-3>; rel="next"' },
+        });
+      }
+      return new Response(JSON.stringify([apiAccount(2)]), { status: 200 });
+    }) as typeof fetch;
+
+    const result = await getFollowing(
+      new GitHubClient({
+        fetch: fetchMock,
+        sleep: async (delay) => void delays.push(delay),
+      }),
+      "octocat",
+    );
+
+    const firstUrl =
+      "https://api.github.com/users/octocat/following?per_page=100";
+    assert.equal(requests.get(firstUrl), 1);
+    assert.equal(requests.get("https://api.github.com/page-2"), 2);
+    assert.equal(requests.get("https://api.github.com/page-3"), 1);
+    assert.deepEqual(delays, [1_000]);
+    assert.deepEqual(
+      result.accounts.map(({ login }) => login),
+      ["account-0", "account-1", "account-2"],
+    );
+  });
+});

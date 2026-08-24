@@ -269,7 +269,7 @@ Durante una auditoría se guarda:
 .ghost-following/checkpoints/<username>.json
 ```
 
-La escritura usa un archivo temporal y rename para no reemplazar el último checkpoint válido con contenido parcial. Se persiste después de cada batch reciente resuelto y después de cada cuenta cuyo lookup histórico termina. Una auditoría completa elimina su checkpoint después de producir el reporte y los exports solicitados.
+La escritura captura un snapshot consistente, lo guarda en un temporal único y realiza rename para no reemplazar el último checkpoint válido con contenido parcial. Los commits para un mismo checkpoint se serializan: una versión anterior nunca puede terminar después y reemplazar progreso más nuevo. Se persiste después de cada batch reciente resuelto y después de cada cuenta cuyo lookup histórico termina. Una auditoría completa elimina su checkpoint después de producir el reporte y los exports solicitados.
 
 Una ejecución normal comienza fresca y sobrescribe un checkpoint anterior. Para continuar explícitamente:
 
@@ -285,6 +285,10 @@ El following se consulta nuevamente. Si cambió, la CLI informa las cantidades a
 ## Errores, progreso y rate limits
 
 El barrido reciente muestra hitos de progreso sin imprimir una línea por usuario. Un error asociado a una cuenta produce `UNKNOWN` y permite continuar. Un error asociado sólo a la búsqueda histórica conserva `NO_RECENT_VISIBLE_ACTIVITY`, pero deja la fecha desconocida.
+
+Cada request REST o GraphQL que recibe HTTP 502, 503 o 504 se reintenta hasta un máximo de tres intentos totales, con esperas deterministas de 1 y 2 segundos. Un `Retry-After` numérico en esos mismos estados puede reemplazar la espera, limitado internamente a 5 segundos. También se reintentan sólo códigos de transporte explícitamente clasificados como temporales; otros errores de `fetch`, parsing o schema siguen siendo fatales sin retry. Los retries son silenciosos y conservan exactamente la misma página REST o query/variables GraphQL.
+
+Esta política no se aplica a 401, 403 ni 429. Tampoco reemplaza el fallback binario exclusivo de los resource limits GraphQL.
 
 La búsqueda histórica se ejecuta únicamente para candidatos sin actividad reciente cuyo `hasActivityInThePast` sea verdadero. Las ventanas de una misma cuenta se consultan secuencialmente para poder detenerse en el primer resultado; distintas cuentas sí comparten el pool de cuatro workers. Se generan como máximo 5 queries adicionales por candidato y ninguna cuando la señal de actividad pasada es falsa. Con 30 candidatos, el peor caso teórico es de unas 150 queries históricas adicionales.
 

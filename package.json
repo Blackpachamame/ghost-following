@@ -16,7 +16,7 @@
     "benchmark": "npm run build --silent && node dist/benchmarks/graphql-batching.js",
     "diagnose": "npm run build --silent && node dist/diagnostics/graphql-diagnostic.js",
     "start": "node dist/cli.js",
-    "test": "npm run build --silent && node --test dist/args.test.js dist/checkpoint.test.js dist/cli.test.js dist/report.test.js dist/activity/analyzer.test.js dist/benchmarks/batch-query.test.js dist/benchmarks/graphql-batching.test.js dist/benchmarks/metrics.test.js dist/diagnostics/graphql-diagnostic.test.js dist/domain/account.test.js dist/domain/activity.test.js dist/domain/audit.test.js dist/export/export.test.js dist/github/batch-activity.test.js dist/github/client.test.js dist/github/following.test.js dist/github/graphql.test.js dist/utils/concurrency.test.js",
+    "test": "npm run build --silent && node --test dist/args.test.js dist/checkpoint.test.js dist/cli.test.js dist/report.test.js dist/activity/analyzer.test.js dist/benchmarks/batch-query.test.js dist/benchmarks/graphql-batching.test.js dist/benchmarks/metrics.test.js dist/diagnostics/graphql-diagnostic.test.js dist/domain/account.test.js dist/domain/activity.test.js dist/domain/audit.test.js dist/export/export.test.js dist/github/batch-activity.test.js dist/github/client.test.js dist/github/following.test.js dist/github/graphql.test.js dist/github/retry.test.js dist/utils/concurrency.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {

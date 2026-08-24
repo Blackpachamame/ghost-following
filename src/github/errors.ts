@@ -43,11 +43,14 @@ export class GitHubHttpError extends GitHubError {
     readonly status: number,
     readonly statusText: string,
     readonly apiMessage?: string,
+    readonly attempts = 1,
   ) {
     super(
       `GitHub API request failed with HTTP ${status}${
         statusText ? ` ${statusText}` : ""
-      }${apiMessage ? `: ${apiMessage}` : "."}`,
+      }${apiMessage ? `: ${apiMessage}` : ""}${
+        attempts > 1 ? ` after ${attempts} attempts` : ""
+      }.`,
     );
   }
 }

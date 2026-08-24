@@ -8,6 +8,7 @@ import {
 } from "./activity/analyzer.js";
 import {
   CheckpointError,
+  CheckpointWriter,
   checkpointHistoricalResults,
   checkpointPathFor,
   checkpointRateLimit,
@@ -20,7 +21,6 @@ import {
   recordRecentResults,
   removeCheckpoint,
   validateResumeCheckpoint,
-  writeCheckpointAtomic,
   type AuditCheckpoint,
 } from "./checkpoint.js";
 import { createAuditResult } from "./domain/audit.js";
@@ -34,6 +34,7 @@ import {
 } from "./github/errors.js";
 import { getFollowing } from "./github/following.js";
 import { GitHubGraphQLClient } from "./github/graphql.js";
+import type { Sleep } from "./github/retry.js";
 import { formatActivityReport, formatExportSummary } from "./report.js";
 
 export interface CliIO {
@@ -61,6 +62,7 @@ export async function runCli(
     now?: Date;
     concurrency?: number;
     checkpointRoot?: string;
+    sleep?: Sleep;
   } = {},
 ): Promise<number> {
   const io = options.io ?? console;
@@ -82,12 +84,14 @@ export async function runCli(
     const clientOptions: ConstructorParameters<typeof GitHubClient>[0] = {};
     clientOptions.token = options.token;
     if (options.fetch) clientOptions.fetch = options.fetch;
+    if (options.sleep) clientOptions.sleep = options.sleep;
 
     const following = await getFollowing(new GitHubClient(clientOptions), username);
     const graphQLClientOptions: ConstructorParameters<typeof GitHubGraphQLClient>[0] = {
       token: options.token,
     };
     if (options.fetch) graphQLClientOptions.fetch = options.fetch;
+    if (options.sleep) graphQLClientOptions.sleep = options.sleep;
     const startedAt = options.now ?? new Date();
     const checkpointPath = checkpointPathFor(
       username,
@@ -122,16 +126,12 @@ export async function runCli(
         startedAt,
       );
     }
-    await writeCheckpointAtomic(checkpointPath, checkpoint, startedAt);
+    const checkpointWriter = new CheckpointWriter(checkpointPath);
+    await checkpointWriter.save(checkpoint, startedAt);
     progressSavedFor = username;
 
-    let checkpointWrite = Promise.resolve();
-    const saveCheckpoint = (): Promise<void> => {
-      checkpointWrite = checkpointWrite.then(() =>
-        writeCheckpointAtomic(checkpointPath, checkpoint),
-      );
-      return checkpointWrite;
-    };
+    const saveCheckpoint = (): Promise<void> =>
+      checkpointWriter.save(checkpoint);
     const recentProgress = createProgressReporter(
       "Analyzing recent activity",
       following.accounts.filter(({ type }) => type === "User").length,
@@ -179,7 +179,7 @@ export async function runCli(
         },
       },
     );
-    await checkpointWrite;
+    await checkpointWriter.flush();
     const generatedAt = options.now ?? new Date();
     const audit = createAuditResult({
       user: username,

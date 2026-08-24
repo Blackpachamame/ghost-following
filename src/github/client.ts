@@ -6,6 +6,11 @@ import {
   GitHubUserNotFoundError,
   type RateLimitDetails,
 } from "./errors.js";
+import {
+  requestWithTransientRetry,
+  TransientTransportRetryExhaustedError,
+  type Sleep,
+} from "./retry.js";
 
 export interface RateLimitSnapshot extends RateLimitDetails {
   limit?: number;
@@ -21,6 +26,7 @@ export interface GitHubPage {
 export interface GitHubClientOptions {
   token?: string;
   fetch?: typeof globalThis.fetch;
+  sleep?: Sleep;
 }
 
 function parseIntegerHeader(value: string | null): number | undefined {
@@ -83,10 +89,12 @@ export async function readApiMessage(response: Response): Promise<string | undef
 export class GitHubClient {
   readonly #token: string | undefined;
   readonly #fetch: typeof globalThis.fetch;
+  readonly #sleep: Sleep | undefined;
 
   constructor(options: GitHubClientOptions = {}) {
     this.#token = options.token;
     this.#fetch = options.fetch ?? globalThis.fetch;
+    this.#sleep = options.sleep;
   }
 
   async getPage(url: string, username: string): Promise<GitHubPage> {
@@ -101,11 +109,21 @@ export class GitHubClient {
     }
 
     let response: Response;
+    let attempts: number;
     try {
-      response = await this.#fetch(url, { headers });
+      const retried = await requestWithTransientRetry(
+        () => this.#fetch(url, { headers }),
+        this.#sleep === undefined ? {} : { sleep: this.#sleep },
+      );
+      response = retried.response;
+      attempts = retried.attempts;
     } catch (error) {
+      const exhausted =
+        error instanceof TransientTransportRetryExhaustedError
+          ? ` after ${error.attempts} attempts`
+          : "";
       throw new GitHubNetworkError(
-        `Could not reach GitHub while retrieving the following list for ${JSON.stringify(username)}.`,
+        `Could not reach GitHub while retrieving the following list for ${JSON.stringify(username)}${exhausted}.`,
         { cause: error },
       );
     }
@@ -125,6 +143,7 @@ export class GitHubClient {
         response.status,
         response.statusText,
         await readApiMessage(response),
+        attempts,
       );
     }
 

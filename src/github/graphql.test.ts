@@ -4,6 +4,7 @@ import { createActivityPeriod, type ActivityPeriod } from "../domain/activity.js
 import {
   GitHubAuthenticationError,
   GitHubGraphQLAccountError,
+  GitHubGraphQLFatalError,
 } from "./errors.js";
 import {
   ACCOUNT_ACTIVITY_QUERY,
@@ -151,6 +152,38 @@ function historicalPayload(
   };
 }
 
+function batchPayload(requestBody: string) {
+  const body = JSON.parse(requestBody) as {
+    variables: Record<string, string>;
+  };
+  const data: Record<string, unknown> = {
+    rateLimit: payload().data.rateLimit,
+  };
+  const loginKeys = Object.keys(body.variables)
+    .filter((key) => /^login\d+$/.test(key))
+    .sort((left, right) => Number(left.slice(5)) - Number(right.slice(5)));
+  for (const [index, key] of loginKeys.entries()) {
+    const login = body.variables[key]!;
+    data[`u${index}`] = {
+      login,
+      contributionsCollection: {
+        startedAt: period.from,
+        endedAt: period.to,
+        hasAnyContributions: true,
+        hasAnyRestrictedContributions: false,
+        hasActivityInThePast: false,
+        restrictedContributionsCount: 0,
+        totalCommitContributions: 1,
+        totalIssueContributions: 0,
+        totalPullRequestContributions: 0,
+        totalPullRequestReviewContributions: 0,
+        contributionCalendar: { totalContributions: 1 },
+      },
+    };
+  }
+  return { data };
+}
+
 describe("parseHistoricalActivityResponse", () => {
   it("takes the most recent positive public calendar day", () => {
     const result = parseHistoricalActivityResponse(
@@ -220,6 +253,146 @@ describe("parseHistoricalActivityResponse", () => {
 });
 
 describe("GitHubGraphQLClient", () => {
+  for (const status of [502, 503, 504]) {
+    it(`retries HTTP ${status} with the identical 25-user recent batch`, async () => {
+      const bodies: string[] = [];
+      const delays: number[] = [];
+      const logins = Array.from({ length: 25 }, (_, index) => `user-${index}`);
+      const fetchMock = (async (
+        _input: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        const body = String(init?.body);
+        bodies.push(body);
+        return bodies.length === 1
+          ? new Response("", {
+              status,
+              headers: { "x-ratelimit-remaining": "1" },
+            })
+          : new Response(JSON.stringify(batchPayload(body)), { status: 200 });
+      }) as typeof fetch;
+
+      const result = await new GitHubGraphQLClient({
+        token: "test",
+        fetch: fetchMock,
+        sleep: async (delay) => void delays.push(delay),
+      }).getAccountActivities(logins, period);
+
+      assert.equal(result.items.length, 25);
+      assert.equal(result.rateLimit?.remaining, 4999);
+      assert.equal(bodies.length, 2);
+      assert.equal(bodies[0], bodies[1]);
+      assert.deepEqual(delays, [1_000]);
+      const sent = JSON.parse(bodies[0]!) as {
+        query: string;
+        variables: Record<string, string>;
+      };
+      assert.match(sent.query, /u24: user\(login: \$login24\)/);
+      assert.equal(sent.variables.login0, "user-0");
+      assert.equal(sent.variables.login24, "user-24");
+      assert.equal(sent.variables.from, period.from);
+      assert.equal(sent.variables.to, period.to);
+    });
+  }
+
+  it("retries the same historical login and window after HTTP 503", async () => {
+    const bodies: string[] = [];
+    const delays: number[] = [];
+    const historicalPeriod: ActivityPeriod = {
+      from: "2024-08-22T00:00:00.000Z",
+      to: "2025-08-22T00:00:00.000Z",
+      days: 365,
+    };
+    const fetchMock = (async (
+      _input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      bodies.push(String(init?.body));
+      return bodies.length === 1
+        ? new Response("", { status: 503 })
+        : new Response(JSON.stringify(historicalPayload([])), { status: 200 });
+    }) as typeof fetch;
+
+    await new GitHubGraphQLClient({
+      token: "test",
+      fetch: fetchMock,
+      sleep: async (delay) => void delays.push(delay),
+    }).getHistoricalActivity("octocat", historicalPeriod);
+
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies[0], bodies[1]);
+    assert.deepEqual(delays, [1_000]);
+    const sent = JSON.parse(bodies[0]!) as {
+      variables: Record<string, string>;
+    };
+    assert.deepEqual(sent.variables, {
+      login: "octocat",
+      from: historicalPeriod.from,
+      to: historicalPeriod.to,
+    });
+  });
+
+  it("does not retry GraphQL HTTP 401, 403 or 429", async () => {
+    for (const status of [401, 403, 429]) {
+      let requests = 0;
+      const fetchMock = (async () => {
+        requests += 1;
+        return new Response("", { status });
+      }) as typeof fetch;
+      await assert.rejects(
+        new GitHubGraphQLClient({
+          token: "test",
+          fetch: fetchMock,
+          sleep: async () => {
+            throw new Error("sleep must not be called");
+          },
+        }).getAccountActivity("octocat", period),
+      );
+      assert.equal(requests, 1);
+    }
+  });
+
+  it("does not retry GraphQL authentication or global schema errors in HTTP 200", async () => {
+    const cases: Array<{
+      body: unknown;
+      error: typeof GitHubAuthenticationError | typeof GitHubGraphQLFatalError;
+    }> = [
+      {
+        body: {
+          data: null,
+          errors: [{ message: "Requires authentication" }],
+        },
+        error: GitHubAuthenticationError,
+      },
+      {
+        body: {
+          data: null,
+          errors: [{ message: "Cannot query field invalidField." }],
+        },
+        error: GitHubGraphQLFatalError,
+      },
+    ];
+
+    for (const testCase of cases) {
+      let requests = 0;
+      const fetchMock = (async () => {
+        requests += 1;
+        return new Response(JSON.stringify(testCase.body), { status: 200 });
+      }) as typeof fetch;
+      await assert.rejects(
+        new GitHubGraphQLClient({
+          token: "test",
+          fetch: fetchMock,
+          sleep: async () => {
+            throw new Error("sleep must not be called");
+          },
+        }).getAccountActivity("octocat", period),
+        testCase.error,
+      );
+      assert.equal(requests, 1);
+    }
+  });
+
   it("posts the current query, variables and bearer token", async () => {
     let requestUrl = "";
     let requestInit: RequestInit | undefined;

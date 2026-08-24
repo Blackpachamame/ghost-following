@@ -43,6 +43,37 @@ export class CheckpointError extends Error {
   override readonly name = "CheckpointError";
 }
 
+export type CheckpointWriteOperation = "mkdir" | "writeFile" | "rename";
+
+export interface CheckpointFileSystem {
+  mkdir(path: string, options: { recursive: true }): Promise<unknown>;
+  writeFile(
+    path: string,
+    data: string,
+    options: { encoding: "utf8"; flag: "wx" },
+  ): Promise<unknown>;
+  rename(oldPath: string, newPath: string): Promise<unknown>;
+  rm(path: string, options: { force: true }): Promise<unknown>;
+}
+
+export interface CheckpointWriterOptions {
+  fileSystem?: Partial<CheckpointFileSystem>;
+}
+
+const NODE_CHECKPOINT_FILE_SYSTEM: CheckpointFileSystem = {
+  mkdir,
+  writeFile,
+  rename,
+  rm,
+};
+
+interface CheckpointWriteQueue {
+  tail: Promise<void>;
+}
+
+const checkpointWriteQueues = new Map<string, CheckpointWriteQueue>();
+let temporarySequence = 0;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -165,30 +196,124 @@ export function createCheckpoint(
   };
 }
 
-export async function writeCheckpointAtomic(
-  path: string,
+function checkpointQueueKey(path: string): string {
+  const absolute = resolve(path);
+  return process.platform === "win32"
+    ? absolute.toLocaleLowerCase("en-US")
+    : absolute;
+}
+
+function serializeCheckpointSnapshot(
   checkpoint: AuditCheckpoint,
   now = new Date(),
-): Promise<void> {
+): string {
   if (Number.isNaN(now.getTime())) {
     throw new RangeError("Checkpoint requires a valid update date.");
   }
   checkpoint.updatedAt = now.toISOString();
-  await mkdir(dirname(path), { recursive: true });
-  const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  return `${JSON.stringify(checkpoint, null, 2)}\n`;
+}
+
+function filesystemContext(error: unknown): string {
+  const code =
+    isRecord(error) && typeof error.code === "string"
+      ? `${error.code} `
+      : "";
+  const message =
+    error instanceof Error ? error.message : "Unknown filesystem error.";
+  return `${code}${message}`;
+}
+
+function checkpointWriteError(
+  path: string,
+  operation: CheckpointWriteOperation,
+  error: unknown,
+): CheckpointError {
+  return new CheckpointError(
+    `Failed to write checkpoint at ${path}: during ${operation}: ${filesystemContext(error)}`,
+    { cause: error },
+  );
+}
+
+function nextTemporaryPath(path: string): string {
+  temporarySequence += 1;
+  return `${path}.${process.pid}.${Date.now()}.${temporarySequence}.tmp`;
+}
+
+async function commitCheckpointSnapshot(
+  path: string,
+  snapshot: string,
+  fileSystem: CheckpointFileSystem,
+): Promise<void> {
+  const temporaryPath = nextTemporaryPath(path);
   try {
-    await writeFile(
-      temporaryPath,
-      `${JSON.stringify(checkpoint, null, 2)}\n`,
-      { encoding: "utf8", flag: "w" },
-    );
-    await rename(temporaryPath, path);
+    await fileSystem.mkdir(dirname(path), { recursive: true });
   } catch (error) {
-    await rm(temporaryPath, { force: true }).catch(() => undefined);
-    throw new CheckpointError(`Failed to write checkpoint at ${path}.`, {
-      cause: error,
-    });
+    throw checkpointWriteError(path, "mkdir", error);
   }
+
+  try {
+    await fileSystem.writeFile(
+      temporaryPath,
+      snapshot,
+      { encoding: "utf8", flag: "wx" },
+    );
+  } catch (error) {
+    await fileSystem.rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw checkpointWriteError(path, "writeFile", error);
+  }
+
+  try {
+    await fileSystem.rename(temporaryPath, path);
+  } catch (error) {
+    await fileSystem.rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw checkpointWriteError(path, "rename", error);
+  }
+}
+
+export class CheckpointWriter {
+  readonly #path: string;
+  readonly #fileSystem: CheckpointFileSystem;
+  readonly #queue: CheckpointWriteQueue;
+
+  constructor(path: string, options: CheckpointWriterOptions = {}) {
+    this.#path = path;
+    this.#fileSystem = {
+      ...NODE_CHECKPOINT_FILE_SYSTEM,
+      ...options.fileSystem,
+    };
+    const key = checkpointQueueKey(path);
+    const existing = checkpointWriteQueues.get(key);
+    if (existing !== undefined) {
+      this.#queue = existing;
+    } else {
+      this.#queue = { tail: Promise.resolve() };
+      checkpointWriteQueues.set(key, this.#queue);
+    }
+  }
+
+  save(checkpoint: AuditCheckpoint, now = new Date()): Promise<void> {
+    const snapshot = serializeCheckpointSnapshot(checkpoint, now);
+    const operation = this.#queue.tail
+      .catch(() => undefined)
+      .then(() =>
+        commitCheckpointSnapshot(this.#path, snapshot, this.#fileSystem),
+      );
+    this.#queue.tail = operation;
+    return operation;
+  }
+
+  flush(): Promise<void> {
+    return this.#queue.tail;
+  }
+}
+
+export function writeCheckpointAtomic(
+  path: string,
+  checkpoint: AuditCheckpoint,
+  now = new Date(),
+): Promise<void> {
+  return new CheckpointWriter(path).save(checkpoint, now);
 }
 
 export async function loadCheckpoint(path: string): Promise<AuditCheckpoint> {

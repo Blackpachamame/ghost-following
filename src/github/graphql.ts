@@ -14,6 +14,11 @@ import {
   GitHubRateLimitError,
   type RateLimitDetails,
 } from "./errors.js";
+import {
+  requestWithTransientRetry,
+  TransientTransportRetryExhaustedError,
+  type Sleep,
+} from "./retry.js";
 
 const GRAPHQL_ENDPOINT = "https://api.github.com/graphql";
 
@@ -97,6 +102,7 @@ export interface HistoricalActivityQueryResult {
 export interface GitHubGraphQLClientOptions {
   token: string;
   fetch?: typeof globalThis.fetch;
+  sleep?: Sleep;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -470,10 +476,12 @@ export function parseHistoricalActivityResponse(
 export class GitHubGraphQLClient {
   readonly #token: string;
   readonly #fetch: typeof globalThis.fetch;
+  readonly #sleep: Sleep | undefined;
 
   constructor(options: GitHubGraphQLClientOptions) {
     this.#token = options.token;
     this.#fetch = options.fetch ?? globalThis.fetch;
+    this.#sleep = options.sleep;
   }
 
   async getAccountActivity(
@@ -522,24 +530,34 @@ export class GitHubGraphQLClient {
     variables: Readonly<Record<string, string>>,
   ): Promise<unknown> {
     let response: Response;
+    let attempts: number;
+    const body = JSON.stringify({ query, variables });
     try {
-      response = await this.#fetch(GRAPHQL_ENDPOINT, {
-        method: "POST",
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${this.#token}`,
-          "Content-Type": "application/json",
-          "User-Agent": "github-ghost-following",
-        },
-        body: JSON.stringify({
-          query,
-          variables,
-        }),
-      });
+      const retried = await requestWithTransientRetry(
+        () =>
+          this.#fetch(GRAPHQL_ENDPOINT, {
+            method: "POST",
+            headers: {
+              Accept: "application/vnd.github+json",
+              Authorization: `Bearer ${this.#token}`,
+              "Content-Type": "application/json",
+              "User-Agent": "github-ghost-following",
+            },
+            body,
+          }),
+        this.#sleep === undefined ? {} : { sleep: this.#sleep },
+      );
+      response = retried.response;
+      attempts = retried.attempts;
     } catch (error) {
-      throw new GitHubNetworkError("Could not reach the GitHub GraphQL endpoint.", {
-        cause: error,
-      });
+      const exhausted =
+        error instanceof TransientTransportRetryExhaustedError
+          ? ` after ${error.attempts} attempts`
+          : "";
+      throw new GitHubNetworkError(
+        `Could not reach the GitHub GraphQL endpoint${exhausted}.`,
+        { cause: error },
+      );
     }
 
     const headerRateLimit = readRateLimit(response.headers);
@@ -568,6 +586,7 @@ export class GitHubGraphQLClient {
         response.status,
         response.statusText,
         await readApiMessage(response),
+        attempts,
       );
     }
 
