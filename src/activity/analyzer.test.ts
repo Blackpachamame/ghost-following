@@ -5,9 +5,11 @@ import {
   createActivityPeriod,
   createHistoricalPeriods,
   type AccountActivity,
+  type AccountActivityResult,
   type ActivityPeriod,
 } from "../domain/activity.js";
 import { GitHubGraphQLAccountError } from "../github/errors.js";
+import { GitHubRateLimitError } from "../github/errors.js";
 import type { AccountActivityQueryResult } from "../github/graphql.js";
 import {
   analyzeFollowingActivity,
@@ -20,6 +22,228 @@ const rateLimit = (remaining: number) => ({
   limit: 5000,
   remaining,
   resetAt: new Date("2026-08-22T01:00:00.000Z"),
+});
+
+describe("productive recent batching", () => {
+  function batchSuccess(
+    logins: readonly string[],
+    remaining = 4900,
+  ) {
+    return {
+      items: logins.map((login) => ({
+        login,
+        status: "SUCCESS" as const,
+        activity: queryResult(login, 1).activity,
+      })),
+      rateLimit: rateLimit(remaining),
+    };
+  }
+
+  function batchResourceLimit(logins: readonly string[]) {
+    return {
+      items: logins.map((login) => ({
+        login,
+        status: "RESOURCE_LIMIT" as const,
+        error: "Resource limits for this query exceeded.",
+      })),
+      rateLimit: rateLimit(4900),
+    };
+  }
+
+  const historicalNeverCalled = async () => {
+    throw new Error("Historical lookup should not run for active fixtures.");
+  };
+
+  it("splits 25 as 12 + 13 and a failing 13 as 6 + 7", async () => {
+    const calls: number[] = [];
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins) {
+        calls.push(logins.length);
+        return logins.length === 25 || logins.length === 13
+          ? batchResourceLimit(logins)
+          : batchSuccess(logins);
+      },
+      getHistoricalActivity: historicalNeverCalled,
+    };
+    const accounts = Array.from({ length: 25 }, (_, index) =>
+      account(`user-${index}`, "User", index + 1),
+    );
+
+    const analysis = await analyzeFollowingActivity(accounts, provider, period);
+
+    assert.deepEqual(calls, [25, 12, 13, 6, 7]);
+    assert.equal(analysis.counts.ACTIVE, 25);
+    assert.equal(analysis.counts.UNKNOWN, 0);
+  });
+
+  it("marks a size-one resource failure UNKNOWN after one request", async () => {
+    const calls: number[] = [];
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins) {
+        calls.push(logins.length);
+        return batchResourceLimit(logins);
+      },
+      getHistoricalActivity: historicalNeverCalled,
+    };
+
+    const analysis = await analyzeFollowingActivity(
+      [account("limited")],
+      provider,
+      period,
+    );
+
+    assert.deepEqual(calls, [1]);
+    assert.equal(analysis.results[0]?.status, "UNKNOWN");
+  });
+
+  it("does not repeat a successful alias while retrying one partial failure", async () => {
+    const calls: string[][] = [];
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins) {
+        calls.push([...logins]);
+        if (logins.length === 2) {
+          return {
+            items: [
+              {
+                login: logins[0]!,
+                status: "SUCCESS" as const,
+                activity: queryResult(logins[0]!, 1).activity,
+              },
+              {
+                login: logins[1]!,
+                status: "RESOURCE_LIMIT" as const,
+                error: "Resource limits for this query exceeded.",
+              },
+            ],
+            rateLimit: rateLimit(4900),
+          };
+        }
+        return batchSuccess(logins);
+      },
+      getHistoricalActivity: historicalNeverCalled,
+    };
+
+    const analysis = await analyzeFollowingActivity(
+      [account("ok", "User", 1), account("retry", "User", 2)],
+      provider,
+      period,
+    );
+
+    assert.deepEqual(calls, [["ok", "retry"], ["retry"]]);
+    assert.equal(analysis.counts.ACTIVE, 2);
+  });
+
+  it("resumes completed recent and historical results and only requests pending users", async () => {
+    const completedAccount = account("completed", "User", 1);
+    const quietAccount = account("quiet", "User", 2);
+    const pendingAccount = account("pending", "User", 3);
+    const completedRecent: AccountActivityResult = {
+      account: completedAccount,
+      activity: queryResult("completed", 2).activity,
+      status: "ACTIVE",
+    };
+    const quietRecent: AccountActivityResult = {
+      account: quietAccount,
+      activity: queryResult("quiet", 0, false).activity,
+      status: "NO_RECENT_VISIBLE_ACTIVITY",
+    };
+    const quietHistorical: AccountActivityResult = {
+      ...quietRecent,
+      lastVisibleActivityAt: null,
+      historicalLookupStatus: "NO_PAST_ACTIVITY",
+    };
+    const requested: string[][] = [];
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins) {
+        requested.push([...logins]);
+        return batchSuccess(logins);
+      },
+      getHistoricalActivity: historicalNeverCalled,
+    };
+
+    const analysis = await analyzeFollowingActivity(
+      [completedAccount, quietAccount, pendingAccount],
+      provider,
+      period,
+      {
+        completedRecentActivity: [completedRecent, quietRecent],
+        completedHistoricalActivity: [quietHistorical],
+      },
+    );
+
+    assert.deepEqual(requested, [["pending"]]);
+    assert.deepEqual(
+      analysis.results.map(({ account: value }) => value.login),
+      ["completed", "quiet", "pending"],
+    );
+    assert.equal(analysis.results[1]?.historicalLookupStatus, "NO_PAST_ACTIVITY");
+  });
+
+  it("saves the completed batch and stops before another request at zero quota", async () => {
+    let requests = 0;
+    let saved = 0;
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins) {
+        requests += 1;
+        return batchSuccess(logins, 0);
+      },
+      getHistoricalActivity: historicalNeverCalled,
+    };
+    const accounts = Array.from({ length: 30 }, (_, index) =>
+      account(`user-${index}`, "User", index + 1),
+    );
+
+    await assert.rejects(
+      analyzeFollowingActivity(accounts, provider, period, {
+        onRecentBatchCompleted(results) {
+          saved += results.length;
+        },
+      }),
+      GitHubRateLimitError,
+    );
+    assert.equal(requests, 1);
+    assert.equal(saved, 25);
+  });
+
+  it("produces equivalent account results with batch and individual transports", async () => {
+    const accounts = [
+      account("active", "User", 1),
+      account("quiet", "User", 2),
+    ];
+    const individual: ActivityProvider = {
+      async getAccountActivity(login) {
+        return queryResult(login, login === "active" ? 3 : 0, false);
+      },
+      async getHistoricalActivity() {
+        return { lastVisibleActivityAt: null, rateLimit: rateLimit(4800) };
+      },
+    };
+    const batch: ActivityProvider = {
+      async getAccountActivities(logins) {
+        return {
+          items: logins.map((login) => ({
+            login,
+            status: "SUCCESS" as const,
+            activity: queryResult(login, login === "active" ? 3 : 0, false)
+              .activity,
+          })),
+          rateLimit: rateLimit(4900),
+        };
+      },
+      async getHistoricalActivity() {
+        return { lastVisibleActivityAt: null, rateLimit: rateLimit(4800) };
+      },
+    };
+
+    const [individualAnalysis, batchAnalysis] = await Promise.all([
+      analyzeFollowingActivity(accounts, individual, period),
+      analyzeFollowingActivity(accounts, batch, period),
+    ]);
+
+    assert.deepEqual(batchAnalysis.results, individualAnalysis.results);
+    assert.deepEqual(batchAnalysis.counts, individualAnalysis.counts);
+    assert.equal(batchAnalysis.coverage, individualAnalysis.coverage);
+  });
 });
 
 function account(login: string, type = "User", id = 1): FollowedAccount {

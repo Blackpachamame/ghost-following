@@ -14,6 +14,7 @@ export const HELP = [
   "  --days <number>     Activity period in days (default: 365)",
   "  --json <path>       Export full audit as JSON",
   "  --csv <path>        Export account audit as CSV",
+  "  --resume            Resume a compatible saved audit",
   "  -h, --help          Show help",
 ].join("\n");
 
@@ -27,6 +28,7 @@ export interface AuditCliOptions {
   help: false;
   username: string;
   days: number;
+  resume: boolean;
   jsonPath?: string;
   csvPath?: string;
 }
@@ -90,6 +92,7 @@ export function parseArgs(args: readonly string[]): CliOptions {
     help: false,
     username: validateUsername(username),
     days: ACTIVITY_PERIOD_DAYS,
+    resume: false,
   };
 
   for (let index = 1; index < args.length; index += 1) {
@@ -106,6 +109,9 @@ export function parseArgs(args: readonly string[]): CliOptions {
       case "--csv":
         parsed.csvPath = requireValue(args, index, option);
         index += 1;
+        break;
+      case "--resume":
+        parsed.resume = true;
         break;
       default:
         if (option?.startsWith("-")) {

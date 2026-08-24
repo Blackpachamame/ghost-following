@@ -49,6 +49,7 @@ Opciones disponibles:
 --days <number>     Activity period in days (default: 365)
 --json <path>       Export full audit as JSON
 --csv <path>        Export account audit as CSV
+--resume            Resume a compatible saved audit
 -h, --help          Show help
 ```
 
@@ -56,6 +57,7 @@ Ejemplos:
 
 ```bash
 npm run start -- Blackpachamame --days 180
+npm run start -- Blackpachamame --days 180 --resume
 npm run start -- Blackpachamame --json reports/audit.json
 npm run start -- Blackpachamame --days 180 --json reports/audit.json --csv reports/audit.csv
 npm run start -- --help
@@ -64,6 +66,8 @@ npm run start -- --help
 `--days` acepta cualquier entero positivo representable; el valor modifica tanto la query reciente como `Period: last ... days`. El lookup histórico comienza inmediatamente antes del período reciente y mantiene su límite independiente de cinco años.
 
 El token sólo se lee desde el entorno y se envía a GitHub en el header de autenticación. No se imprime, solicita interactivamente ni almacena. Los archivos `.env` están ignorados, aunque el proyecto no los carga automáticamente.
+
+Los checkpoints tampoco contienen tokens, headers, respuestas GraphQL crudas ni calendarios completos. Sólo guardan el snapshot de following, el período exacto y resultados de actividad resumidos necesarios para continuar.
 
 Si el token falta, la CLI termina antes de realizar requests:
 
@@ -243,9 +247,44 @@ alice     824    710      42   61       11      220         ACTIVE
 
 Los candidatos sin actividad pasada aparecen primero, seguidos por los que tienen actividad pasada no encontrada dentro del lookback, los lookups fallidos y finalmente las fechas desde la más antigua hasta la más reciente. El resto se ordena por `INSUFFICIENT_VISIBILITY`, `UNKNOWN` y `ACTIVE`; actualmente el producto no genera el primer estado.
 
-## Errores y concurrencia
+## Cuentas grandes y batching
 
-Las consultas GraphQL usan un pool conservador de cuatro requests concurrentes. Un error asociado a la consulta reciente de una cuenta produce `UNKNOWN` y permite continuar. Un error asociado sólo a la búsqueda histórica conserva `NO_RECENT_VISIBLE_ACTIVITY`, pero deja la fecha desconocida. Errores de autenticación, rate limit, red, HTTP global o estructura global de la respuesta abortan el análisis con código distinto de cero.
+El análisis reciente agrupa hasta 25 usuarios por request GraphQL mediante aliases y variables seguras:
+
+```text
+25 = production default
+```
+
+Este tamaño se eligió empíricamente. No es un máximo garantizado por GitHub: pruebas internas con esta query observaron resource limits en tamaños mayores. Si GitHub rechaza un batch por límites de recursos o complejidad, la CLI conserva los aliases utilizables y divide únicamente los fallidos en mitades hasta resolverlos. Por ejemplo, 25 se divide en 12 + 13. Un fallo individual definitivo produce `UNKNOWN`.
+
+Los errores de autenticación, token inválido, rate limit global, HTTP global o schema no activan esa división. La CLI aborta con código distinto de cero.
+
+Para 5.000 usuarios elegibles, el barrido reciente requiere aproximadamente 200 requests si todos los batches de 25 funcionan. Es una estimación, no una garantía: fallbacks, cambios de GitHub y errores parciales pueden aumentar el número.
+
+## Checkpoint y resume
+
+Durante una auditoría se guarda:
+
+```text
+.ghost-following/checkpoints/<username>.json
+```
+
+La escritura usa un archivo temporal y rename para no reemplazar el último checkpoint válido con contenido parcial. Se persiste después de cada batch reciente resuelto y después de cada cuenta cuyo lookup histórico termina. Una auditoría completa elimina su checkpoint después de producir el reporte y los exports solicitados.
+
+Una ejecución normal comienza fresca y sobrescribe un checkpoint anterior. Para continuar explícitamente:
+
+```bash
+npm run start -- Blackpachamame --resume
+npm run start -- Blackpachamame --days 180 --resume
+```
+
+`--resume` reutiliza el período exacto guardado y omite usuarios recientes e históricos ya completados. Los días solicitados deben coincidir; un checkpoint de 365 días no puede reanudarse con `--days 180`.
+
+El following se consulta nuevamente. Si cambió, la CLI informa las cantidades agregadas y eliminadas, conserva resultados de cuentas aún seguidas, analiza las nuevas y excluye del resultado final las removidas.
+
+## Errores, progreso y rate limits
+
+El barrido reciente muestra hitos de progreso sin imprimir una línea por usuario. Un error asociado a una cuenta produce `UNKNOWN` y permite continuar. Un error asociado sólo a la búsqueda histórica conserva `NO_RECENT_VISIBLE_ACTIVITY`, pero deja la fecha desconocida.
 
 La búsqueda histórica se ejecuta únicamente para candidatos sin actividad reciente cuyo `hasActivityInThePast` sea verdadero. Las ventanas de una misma cuenta se consultan secuencialmente para poder detenerse en el primer resultado; distintas cuentas sí comparten el pool de cuatro workers. Se generan como máximo 5 queries adicionales por candidato y ninguna cuando la señal de actividad pasada es falsa. Con 30 candidatos, el peor caso teórico es de unas 150 queries históricas adicionales.
 
@@ -253,7 +292,7 @@ El coste GraphQL no se presupone; se muestra el último coste observado que GitH
 
 La misma query devuelve `cost`, `limit`, `remaining` y `resetAt`; no se realiza una request adicional para consultar la cuota.
 
-GitHub aplica rate limits independientes a REST y GraphQL. La arquitectura actual consulta la actividad de cada usuario individualmente, por lo que una cuenta con miles de followings puede agotar la cuota antes de completar la auditoría. Esta fase no incorpora batching, aliases, checkpoints ni espera automática al reset; esas optimizaciones quedan para trabajo futuro.
+GitHub aplica rate limits independientes a REST y GraphQL. El batching reduce drásticamente las requests recientes, pero el lookup histórico sigue siendo individual y puede consumir una parte importante de la cuota. Cuando GraphQL informa cuota cero, la CLI guarda el progreso, muestra `resetAt`, termina con código no-cero y ofrece el comando `--resume`. No espera automáticamente hasta el reset.
 
 ## Desarrollo
 
@@ -284,13 +323,13 @@ El benchmark usa APIs reales, requiere `GITHUB_TOKEN` y consume rate limit. La q
 - El período reciente es configurable con `--days` y usa 365 días por defecto.
 - `last visible activity` está limitada a lo que GitHub expone mediante `ContributionsCollection` dentro de cinco años anteriores al comienzo del período reciente; una fecha ausente no significa necesariamente que la cuenta nunca haya contribuido.
 - No hay activity score, interfaz web, backend, base de datos, OAuth, caché ni unfollow.
-- La estrategia GraphQL actual procesa usuarios individualmente y no promete ejecución eficiente para cuentas con 5.000 o más followings.
+- El lookup histórico sigue procesando cuentas individualmente; sólo el análisis reciente usa batching.
 - La actividad privada sólo puede observarse cuando GitHub muestra su conteo anonimizado.
 - La herramienta no puede identificar de forma fiable si una persona oculta actividad privada; `userViewType` no se utiliza como señal de privacidad.
 - `NO_RECENT_VISIBLE_ACTIVITY` nunca debe interpretarse como inactividad absoluta.
 
 ## Próximos pasos
 
-- GraphQL batching mediante aliases.
-- Checkpoints y resume para auditorías largas.
+- Batching histórico, sólo si las mediciones posteriores muestran que es necesario.
 - Decisiones persistentes mediante KEEP/allowlist.
+- Flujo posterior de review.

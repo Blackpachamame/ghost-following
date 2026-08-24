@@ -8,6 +8,7 @@ describe("parseArgs", () => {
       help: false,
       username: "Blackpachamame",
       days: 365,
+      resume: false,
     });
   });
 
@@ -16,6 +17,7 @@ describe("parseArgs", () => {
       help: false,
       username: "octocat",
       days: 180,
+      resume: false,
     });
   });
 
@@ -71,10 +73,22 @@ describe("parseArgs", () => {
         help: false,
         username: "octocat",
         days: 90,
+        resume: false,
         jsonPath: "reports/audit.json",
         csvPath: "reports/audit.csv",
       },
     );
+  });
+
+  it("accepts --resume without exposing checkpoint internals", () => {
+    assert.deepEqual(parseArgs(["octocat", "--resume", "--days", "180"]), {
+      help: false,
+      username: "octocat",
+      days: 180,
+      resume: true,
+    });
+    assert.match(HELP, /--resume/);
+    assert.doesNotMatch(HELP, /batch-size|checkpoint-path|no-checkpoint/);
   });
 });
 

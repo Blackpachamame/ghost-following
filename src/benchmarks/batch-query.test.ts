@@ -60,4 +60,11 @@ describe("chunkValues", () => {
       [10, 10, 10, 10, 8],
     );
   });
+
+  it("chunks 78 production-sized users as 25 + 25 + 25 + 3", () => {
+    assert.deepEqual(
+      chunkValues(Array.from({ length: 78 }), 25).map(({ length }) => length),
+      [25, 25, 25, 3],
+    );
+  });
 });

@@ -1,4 +1,9 @@
 import type { AccountActivity, ActivityPeriod } from "../domain/activity.js";
+import {
+  buildAccountActivityBatchQuery,
+  parseAccountActivityBatchResponse,
+  type BatchAccountActivityQueryResult,
+} from "./batch-activity.js";
 import { readApiMessage, readRateLimit } from "./client.js";
 import {
   GitHubAuthenticationError,
@@ -476,8 +481,24 @@ export class GitHubGraphQLClient {
     period: ActivityPeriod,
   ): Promise<AccountActivityQueryResult> {
     return parseAccountActivityResponse(
-      await this.#request(ACCOUNT_ACTIVITY_QUERY, login, period),
+      await this.#request(ACCOUNT_ACTIVITY_QUERY, {
+        login,
+        from: period.from,
+        to: period.to,
+      }),
       login,
+      period,
+    );
+  }
+
+  async getAccountActivities(
+    logins: readonly string[],
+    period: ActivityPeriod,
+  ): Promise<BatchAccountActivityQueryResult> {
+    const built = buildAccountActivityBatchQuery(logins, period);
+    return parseAccountActivityBatchResponse(
+      await this.#request(built.query, built.variables),
+      built,
       period,
     );
   }
@@ -487,15 +508,18 @@ export class GitHubGraphQLClient {
     period: ActivityPeriod,
   ): Promise<HistoricalActivityQueryResult> {
     return parseHistoricalActivityResponse(
-      await this.#request(HISTORICAL_ACTIVITY_QUERY, login, period),
+      await this.#request(HISTORICAL_ACTIVITY_QUERY, {
+        login,
+        from: period.from,
+        to: period.to,
+      }),
       login,
     );
   }
 
   async #request(
     query: string,
-    login: string,
-    period: ActivityPeriod,
+    variables: Readonly<Record<string, string>>,
   ): Promise<unknown> {
     let response: Response;
     try {
@@ -509,7 +533,7 @@ export class GitHubGraphQLClient {
         },
         body: JSON.stringify({
           query,
-          variables: { login, from: period.from, to: period.to },
+          variables,
         }),
       });
     } catch (error) {
