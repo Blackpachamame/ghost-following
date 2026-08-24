@@ -99,6 +99,7 @@ describe("CLI options", () => {
           token: "obvious-test-placeholder",
           fetch: emptyFollowingFetch(),
           now: new Date("2026-08-22T00:00:00.000Z"),
+          checkpointRoot: join(root, "checkpoints"),
           io: { log: (message) => logs.push(message), error() {} },
         },
       );
@@ -137,6 +138,7 @@ describe("CLI options", () => {
           token: "obvious-test-placeholder",
           fetch: emptyFollowingFetch(),
           now: new Date("2026-08-22T00:00:00.000Z"),
+          checkpointRoot: join(root, "checkpoints"),
           io: {
             log: (message) => logs.push(message),
             error: (message) => errors.push(message),

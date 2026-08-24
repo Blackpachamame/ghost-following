@@ -53,8 +53,10 @@ function result(value: FollowedAccount, total: number): AccountActivityResult {
 
 describe("audit checkpoint", () => {
   it("creates, atomically replaces and reloads completed recent/historical work", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ghost-checkpoint-"));
+    const tempDirectory = await mkdtemp(join(tmpdir(), "ghost-checkpoint-"));
+    const root = join(tempDirectory, "checkpoints");
     const path = checkpointPathFor("Owner", root);
+    assert.notEqual(path, checkpointPathFor("Owner"));
     const user = account("one", 1);
     const checkpoint = createCheckpoint(
       "Owner",
@@ -98,7 +100,7 @@ describe("audit checkpoint", () => {
       await removeCheckpoint(path);
       await assert.rejects(access(path));
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await rm(tempDirectory, { recursive: true, force: true });
     }
   });
 
