@@ -13,8 +13,13 @@ import type {
 } from "../github/batch-activity.js";
 import {
   GitHubGraphQLAccountError,
+  GitHubHttpError,
   GitHubRateLimitError,
 } from "../github/errors.js";
+import {
+  TRANSIENT_HTTP_STATUSES,
+  TRANSIENT_MAX_ATTEMPTS,
+} from "../github/retry.js";
 import type {
   AccountActivityQueryResult,
   GraphQLRateLimit,
@@ -25,6 +30,13 @@ import { mapWithConcurrency } from "../utils/concurrency.js";
 
 export const DEFAULT_GRAPHQL_CONCURRENCY = 4;
 export const ACTIVITY_BATCH_SIZE = 25;
+
+export interface RecentBatchHttpFailure {
+  logins: readonly string[];
+  period: ActivityPeriod;
+  httpStatus: number;
+  attempts: number;
+}
 
 export interface ActivityCounts {
   ACTIVE: number;
@@ -75,6 +87,10 @@ export interface ActivityAnalysisOptions {
     total: number,
     rateLimit: GraphQLRateLimit | undefined,
   ): Promise<void> | void;
+  onRecentBatchFailed?(
+    failure: RecentBatchHttpFailure,
+  ): Promise<void> | void;
+  onRecentBatchFailureReportingError?(error: unknown): void;
   onHistoricalAccountCompleted?(
     result: AccountActivityResult,
     completed: number,
@@ -82,6 +98,11 @@ export interface ActivityAnalysisOptions {
     rateLimit: GraphQLRateLimit | undefined,
   ): Promise<void> | void;
 }
+
+type RecentBatchFailureHooks = Pick<
+  ActivityAnalysisOptions,
+  "onRecentBatchFailed" | "onRecentBatchFailureReportingError"
+>;
 
 function loginKey(login: string): string {
   return login.toLocaleLowerCase("en-US");
@@ -189,6 +210,7 @@ async function resolveBatchWithFallback(
   client: ActivityProvider,
   period: ActivityPeriod,
   observedRateLimit: GraphQLRateLimit | undefined,
+  failureHooks: RecentBatchFailureHooks,
 ): Promise<{ work: WorkResult[]; rateLimit?: GraphQLRateLimit }> {
   ensureQuota(observedRateLimit);
 
@@ -234,10 +256,36 @@ async function resolveBatchWithFallback(
     return rateLimit === undefined ? { work } : { work, rateLimit };
   }
 
-  const response = await client.getAccountActivities(
-    accounts.map(({ login }) => login),
-    period,
-  );
+  let response: BatchAccountActivityQueryResult;
+  try {
+    response = await client.getAccountActivities(
+      accounts.map(({ login }) => login),
+      period,
+    );
+  } catch (error) {
+    if (
+      error instanceof GitHubHttpError &&
+      TRANSIENT_HTTP_STATUSES.has(error.status) &&
+      error.attempts === TRANSIENT_MAX_ATTEMPTS
+    ) {
+      const failure: RecentBatchHttpFailure = {
+        logins: accounts.map(({ login }) => login),
+        period: { ...period },
+        httpStatus: error.status,
+        attempts: error.attempts,
+      };
+      try {
+        await failureHooks.onRecentBatchFailed?.(failure);
+      } catch (reportingError) {
+        try {
+          failureHooks.onRecentBatchFailureReportingError?.(reportingError);
+        } catch {
+          // Reporting must never replace the original exhausted HTTP error.
+        }
+      }
+    }
+    throw error;
+  }
   const rateLimit = selectLatestRateLimit([
     observedRateLimit,
     response.rateLimit,
@@ -282,6 +330,7 @@ async function resolveBatchWithFallback(
       client,
       period,
       rateLimit,
+      failureHooks,
     );
     work.push(...resolved.work);
     const fallbackRateLimit = selectLatestRateLimit([
@@ -305,6 +354,7 @@ async function resolveBatchWithFallback(
       client,
       period,
       fallbackRateLimit,
+      failureHooks,
     );
     work.push(...resolved.work);
     fallbackRateLimit = selectLatestRateLimit([
@@ -422,6 +472,7 @@ export async function analyzeFollowingActivity(
       client,
       period,
       latestRateLimit,
+      options,
     );
     latestRateLimit = selectLatestRateLimit([
       latestRateLimit,

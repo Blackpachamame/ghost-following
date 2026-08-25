@@ -290,6 +290,14 @@ Cada request REST o GraphQL que recibe HTTP 502, 503 o 504 se reintenta hasta un
 
 Esta política no se aplica a 401, 403 ni 429. Tampoco reemplaza el fallback binario exclusivo de los resource limits GraphQL.
 
+Si un batch reciente agota los tres intentos con HTTP 502, 503 o 504, la auditoría sigue terminando con error y muestra los logins exactos del request fallido. Además agrega una línea JSON independiente en:
+
+```text
+.ghost-following/diagnostics/<audit-username>-failures.jsonl
+```
+
+El incidente contiene únicamente timestamp, usuario auditado, período recent, status HTTP, intentos y logins del batch. No contiene token, headers, request GraphQL, calendarios ni responses. El archivo es local, acumulativo y está cubierto por el ignore de `.ghost-following/`. Si no puede escribirse, la CLI muestra una advertencia pero preserva como error principal el HTTP original.
+
 La búsqueda histórica se ejecuta únicamente para candidatos sin actividad reciente cuyo `hasActivityInThePast` sea verdadero. Las ventanas de una misma cuenta se consultan secuencialmente para poder detenerse en el primer resultado; distintas cuentas sí comparten el pool de cuatro workers. Se generan como máximo 5 queries adicionales por candidato y ninguna cuando la señal de actividad pasada es falsa. Con 30 candidatos, el peor caso teórico es de unas 150 queries históricas adicionales.
 
 El coste GraphQL no se presupone; se muestra el último coste observado que GitHub devuelve.

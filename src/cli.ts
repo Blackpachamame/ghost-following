@@ -25,6 +25,12 @@ import {
 } from "./checkpoint.js";
 import { createAuditResult } from "./domain/audit.js";
 import { createActivityPeriod } from "./domain/activity.js";
+import {
+  createRecentBatchFailureIncident,
+  formatRecentBatchDiagnosticWarning,
+  formatRecentBatchFailure,
+  RecentBatchFailureWriter,
+} from "./diagnostics/recent-batch-failures.js";
 import { ExportWriteError, writeAuditExports } from "./export/files.js";
 import { GitHubClient } from "./github/client.js";
 import {
@@ -62,6 +68,7 @@ export async function runCli(
     now?: Date;
     concurrency?: number;
     checkpointRoot?: string;
+    diagnosticsRoot?: string;
     sleep?: Sleep;
   } = {},
 ): Promise<number> {
@@ -127,6 +134,11 @@ export async function runCli(
       );
     }
     const checkpointWriter = new CheckpointWriter(checkpointPath);
+    const recentBatchFailureWriter = new RecentBatchFailureWriter(username, {
+      ...(options.diagnosticsRoot === undefined
+        ? {}
+        : { root: options.diagnosticsRoot }),
+    });
     await checkpointWriter.save(checkpoint, startedAt);
     progressSavedFor = username;
 
@@ -170,6 +182,19 @@ export async function runCli(
           recordRateLimit(checkpoint, rateLimit);
           await saveCheckpoint();
           recentProgress(completed, total);
+        },
+        async onRecentBatchFailed(failure) {
+          io.error(formatRecentBatchFailure(failure));
+          await recentBatchFailureWriter.append(
+            createRecentBatchFailureIncident(
+              username,
+              failure,
+              options.now ?? new Date(),
+            ),
+          );
+        },
+        onRecentBatchFailureReportingError(error) {
+          io.error(formatRecentBatchDiagnosticWarning(error));
         },
         async onHistoricalAccountCompleted(result, completed, total, rateLimit) {
           recordHistoricalResult(checkpoint, result);
