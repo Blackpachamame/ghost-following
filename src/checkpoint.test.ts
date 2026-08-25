@@ -78,7 +78,7 @@ describe("audit checkpoint", () => {
     recordHistoricalResult(checkpoint, {
       ...recent,
       lastVisibleActivityAt: null,
-      historicalLookupStatus: "NO_PAST_ACTIVITY",
+      historicalLookupStatus: "NOT_FOUND_IN_LOOKBACK",
     });
 
     try {
@@ -108,6 +108,35 @@ describe("audit checkpoint", () => {
 
       await removeCheckpoint(path);
       await assert.rejects(access(path));
+    } finally {
+      await rm(tempDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("loads a schema 1 legacy NO_PAST_ACTIVITY result for resume correction", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "ghost-checkpoint-legacy-"));
+    const path = checkpointPathFor("Owner", join(tempDirectory, "checkpoints"));
+    const user = account("legacy", 1);
+    const recent = result(user, 0);
+    const checkpoint = createCheckpoint("Owner", period, [user]);
+    recordRecentResults(checkpoint, [recent]);
+    (checkpoint.completedHistoricalActivity as Record<string, unknown>)[
+      "legacy"
+    ] = {
+      ...recent,
+      lastVisibleActivityAt: null,
+      historicalLookupStatus: "NO_PAST_ACTIVITY",
+    };
+
+    try {
+      await writeCheckpointAtomic(path, checkpoint);
+      const loaded = await loadCheckpoint(path);
+      const legacy = checkpointHistoricalResults(loaded)[0] as unknown as {
+        historicalLookupStatus?: string;
+      };
+
+      assert.equal(loaded.schemaVersion, 1);
+      assert.equal(legacy.historicalLookupStatus, "NO_PAST_ACTIVITY");
     } finally {
       await rm(tempDirectory, { recursive: true, force: true });
     }
@@ -189,7 +218,7 @@ describe("audit checkpoint", () => {
       recordHistoricalResult(checkpoint, {
         ...item,
         lastVisibleActivityAt: null,
-        historicalLookupStatus: "NO_PAST_ACTIVITY",
+        historicalLookupStatus: "NOT_FOUND_IN_LOOKBACK",
       });
       return writer.save(checkpoint, now);
     };
@@ -240,7 +269,7 @@ describe("audit checkpoint", () => {
       recordHistoricalResult(checkpoint, {
         ...result(user, 0),
         lastVisibleActivityAt: null,
-        historicalLookupStatus: "NO_PAST_ACTIVITY",
+        historicalLookupStatus: "NOT_FOUND_IN_LOOKBACK",
       });
       const filesystemCause = Object.assign(new Error("file is locked"), {
         code: "EPERM",

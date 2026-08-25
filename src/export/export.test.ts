@@ -42,8 +42,8 @@ function auditFixture(): AuditResult {
         issueContributions: 0,
         restrictedContributionsCount: 0,
         hasActivityInThePast: false,
-        lastVisibleActivityAt: null,
-        historicalLookupStatus: "NO_PAST_ACTIVITY",
+        lastVisibleActivityAt: "2025-08-17",
+        historicalLookupStatus: "FOUND",
       },
     ],
     rateLimits: {
@@ -66,7 +66,9 @@ describe("JSON export", () => {
     assert.equal(parsed.schemaVersion, 1);
     assert.equal(parsed.summary.coverage, 100);
     assert.equal(parsed.accounts.length, 1);
-    assert.equal(parsed.accounts[0]?.lastVisibleActivityAt, null);
+    assert.equal(parsed.accounts[0]?.hasActivityInThePast, false);
+    assert.equal(parsed.accounts[0]?.lastVisibleActivityAt, "2025-08-17");
+    assert.equal(parsed.accounts[0]?.historicalLookupStatus, "FOUND");
     assert.doesNotMatch(output, /GITHUB_TOKEN|obvious-secret-value/);
   });
 });
@@ -88,7 +90,8 @@ describe("CSV export", () => {
     const output = serializeAuditCsv(auditFixture());
     assert.match(output, /"comma,name"/);
     assert.match(output, /"https:\/\/example\.test\/""quoted""\nnext"/);
-    assert.match(output, /false,,NO_PAST_ACTIVITY/);
+    assert.match(output, /false,2025-08-17,FOUND/);
+    assert.doesNotMatch(output, /NO_PAST_ACTIVITY/);
   });
 });
 

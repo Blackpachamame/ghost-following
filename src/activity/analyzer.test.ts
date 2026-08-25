@@ -558,7 +558,7 @@ describe("productive recent batching", () => {
     const quietHistorical: AccountActivityResult = {
       ...quietRecent,
       lastVisibleActivityAt: null,
-      historicalLookupStatus: "NO_PAST_ACTIVITY",
+      historicalLookupStatus: "NOT_FOUND_IN_LOOKBACK",
     };
     const requested: string[][] = [];
     const provider: ActivityProvider = {
@@ -584,7 +584,117 @@ describe("productive recent batching", () => {
       analysis.results.map(({ account: value }) => value.login),
       ["completed", "quiet", "pending"],
     );
-    assert.equal(analysis.results[1]?.historicalLookupStatus, "NO_PAST_ACTIVITY");
+    assert.equal(
+      analysis.results[1]?.historicalLookupStatus,
+      "NOT_FOUND_IN_LOOKBACK",
+    );
+  });
+
+  it("reprocesses a legacy NO_PAST_ACTIVITY checkpoint without repeating recent", async () => {
+    const quietAccount = account("legacy-quiet", "User", 1);
+    const quietRecent: AccountActivityResult = {
+      account: quietAccount,
+      activity: queryResult("legacy-quiet", 0, false).activity,
+      status: "NO_RECENT_VISIBLE_ACTIVITY",
+    };
+    const legacyHistorical = {
+      ...quietRecent,
+      lastVisibleActivityAt: null,
+      historicalLookupStatus: "NO_PAST_ACTIVITY",
+    } as unknown as AccountActivityResult;
+    let recentCalls = 0;
+    const requestedPeriods: ActivityPeriod[] = [];
+    const persisted: AccountActivityResult[] = [];
+    const provider: ActivityProvider = {
+      async getAccountActivities() {
+        recentCalls += 1;
+        throw new Error("Completed recent activity must not be requested.");
+      },
+      async getHistoricalActivity(_login, historicalPeriod) {
+        requestedPeriods.push(historicalPeriod);
+        return {
+          lastVisibleActivityAt: "2025-08-17",
+          rateLimit: rateLimit(4800),
+        };
+      },
+    };
+
+    const analysis = await analyzeFollowingActivity(
+      [quietAccount],
+      provider,
+      period,
+      {
+        completedRecentActivity: [quietRecent],
+        completedHistoricalActivity: [legacyHistorical],
+        onHistoricalAccountCompleted(result) {
+          persisted.push(result);
+        },
+      },
+    );
+
+    assert.equal(recentCalls, 0);
+    assert.deepEqual(requestedPeriods, createHistoricalPeriods(period).slice(0, 1));
+    assert.equal(analysis.results[0]?.historicalLookupStatus, "FOUND");
+    assert.equal(analysis.results[0]?.lastVisibleActivityAt, "2025-08-17");
+    assert.equal(analysis.results[0]?.activity?.hasActivityInThePast, false);
+    assert.deepEqual(persisted, analysis.results);
+  });
+
+  it("reuses every modern historical checkpoint status without new queries", async () => {
+    const accounts = [
+      account("saved-found", "User", 1),
+      account("saved-not-found", "User", 2),
+      account("saved-failed", "User", 3),
+    ];
+    const recent = accounts.map((value) => ({
+      account: value,
+      activity: queryResult(value.login, 0, false).activity,
+      status: "NO_RECENT_VISIBLE_ACTIVITY" as const,
+    }));
+    const historical: AccountActivityResult[] = [
+      {
+        ...recent[0]!,
+        lastVisibleActivityAt: "2024-01-10",
+        historicalLookupStatus: "FOUND",
+      },
+      {
+        ...recent[1]!,
+        lastVisibleActivityAt: null,
+        historicalLookupStatus: "NOT_FOUND_IN_LOOKBACK",
+      },
+      {
+        ...recent[2]!,
+        lastVisibleActivityAt: null,
+        historicalLookupStatus: "FAILED",
+        historicalLookupError: "saved failure",
+      },
+    ];
+    let historicalCalls = 0;
+
+    const analysis = await analyzeFollowingActivity(
+      accounts,
+      {
+        async getAccountActivities() {
+          throw new Error("Completed recent activity must not be requested.");
+        },
+        async getHistoricalActivity() {
+          historicalCalls += 1;
+          throw new Error("Completed historical activity must not be requested.");
+        },
+      },
+      period,
+      {
+        completedRecentActivity: recent,
+        completedHistoricalActivity: historical,
+      },
+    );
+
+    assert.equal(historicalCalls, 0);
+    assert.deepEqual(
+      analysis.results.map(({ historicalLookupStatus }) =>
+        historicalLookupStatus),
+      ["FOUND", "NOT_FOUND_IN_LOOKBACK", "FAILED"],
+    );
   });
 
   it("saves the completed batch and stops before another request at zero quota", async () => {
@@ -728,31 +838,82 @@ describe("analyzeFollowingActivity", () => {
     assert.equal(analysis.rateLimit?.remaining, 4996);
   });
 
-  it("performs no historical query when hasActivityInThePast is false", async () => {
-    let historicalCalls = 0;
+  it("finds the real regression date despite hasActivityInThePast being false", async () => {
+    const regressionPeriod: ActivityPeriod = {
+      from: "2025-08-24T23:41:55.948Z",
+      to: "2026-08-24T23:41:55.948Z",
+      days: 365,
+    };
+    const requestedPeriods: ActivityPeriod[] = [];
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins, requestedPeriod) {
+        return {
+          items: logins.map((login) => ({
+            login,
+            status: "SUCCESS" as const,
+            activity: {
+              ...queryResult(login, 0, false).activity,
+              periodStart: requestedPeriod.from,
+              periodEnd: requestedPeriod.to,
+            },
+          })),
+          rateLimit: rateLimit(4900),
+        };
+      },
+      async getHistoricalActivity(login, historicalPeriod) {
+        assert.equal(login, "robbertjanhermeler-cmd");
+        requestedPeriods.push(historicalPeriod);
+        return {
+          lastVisibleActivityAt: "2025-08-17",
+          rateLimit: rateLimit(4899),
+        };
+      },
+    };
+
+    const analysis = await analyzeFollowingActivity(
+      [account("robbertjanhermeler-cmd")],
+      provider,
+      regressionPeriod,
+    );
+
+    assert.deepEqual(requestedPeriods, [
+      {
+        from: "2024-08-24T23:41:55.948Z",
+        to: "2025-08-24T23:41:55.947Z",
+        days: 365,
+      },
+    ]);
+    assert.equal(analysis.results[0]?.status, "NO_RECENT_VISIBLE_ACTIVITY");
+    assert.equal(analysis.results[0]?.historicalLookupStatus, "FOUND");
+    assert.equal(analysis.results[0]?.lastVisibleActivityAt, "2025-08-17");
+    assert.equal(analysis.results[0]?.activity?.hasActivityInThePast, false);
+    assert.equal(analysis.coverage, 100);
+  });
+
+  it("checks all five windows when hasActivityInThePast is false and finds nothing", async () => {
+    const requestedPeriods: ActivityPeriod[] = [];
     const provider: ActivityProvider = {
       async getAccountActivity(login) {
         return queryResult(login, 0, false);
       },
-      async getHistoricalActivity() {
-        historicalCalls += 1;
+      async getHistoricalActivity(_login, historicalPeriod) {
+        requestedPeriods.push(historicalPeriod);
         return { lastVisibleActivityAt: null, rateLimit: rateLimit(4990) };
       },
     };
 
     const analysis = await analyzeFollowingActivity(
-      [account("never-active")],
+      [account("not-found-with-false-signal")],
       provider,
       period,
     );
 
-    assert.equal(historicalCalls, 0);
-    assert.equal(analysis.results[0]?.status, "NO_RECENT_VISIBLE_ACTIVITY");
+    assert.deepEqual(requestedPeriods, createHistoricalPeriods(period));
     assert.equal(
       analysis.results[0]?.historicalLookupStatus,
-      "NO_PAST_ACTIVITY",
+      "NOT_FOUND_IN_LOOKBACK",
     );
-    assert.equal(analysis.coverage, 100);
+    assert.equal(analysis.results[0]?.activity?.hasActivityInThePast, false);
   });
 
   it("checks annual windows sequentially and stops at the first match", async () => {
@@ -809,30 +970,63 @@ describe("analyzeFollowingActivity", () => {
     );
   });
 
-  it("preserves NO_RECENT_VISIBLE_ACTIVITY when historical lookup fails", async () => {
+  it("does not run historical for ACTIVE or UNKNOWN results", async () => {
     let historicalCalls = 0;
     const provider: ActivityProvider = {
       async getAccountActivity(login) {
-        return queryResult(login, 0, true);
+        if (login === "unknown") {
+          throw new GitHubGraphQLAccountError("Account result unavailable.");
+        }
+        return queryResult(login, 1, false);
       },
-      async getHistoricalActivity(login) {
+      async getHistoricalActivity() {
         historicalCalls += 1;
-        throw new GitHubGraphQLAccountError(
-          `Historical data unavailable for ${login}.`,
-        );
+        throw new Error("Historical must not run for ACTIVE or UNKNOWN.");
       },
     };
 
     const analysis = await analyzeFollowingActivity(
-      [account("quiet")],
+      [account("active", "User", 1), account("unknown", "User", 2)],
       provider,
       period,
     );
 
-    assert.equal(historicalCalls, 1);
-    assert.equal(analysis.results[0]?.status, "NO_RECENT_VISIBLE_ACTIVITY");
-    assert.equal(analysis.results[0]?.lastVisibleActivityAt, null);
-    assert.equal(analysis.results[0]?.historicalLookupStatus, "FAILED");
-    assert.match(analysis.results[0]?.historicalLookupError ?? "", /unavailable/);
+    assert.equal(historicalCalls, 0);
+    assert.deepEqual(
+      analysis.results.map(({ status }) => status),
+      ["ACTIVE", "UNKNOWN"],
+    );
   });
+
+  for (const hasActivityInThePast of [false, true] as const) {
+    it(`preserves NO_RECENT_VISIBLE_ACTIVITY when historical fails with signal ${hasActivityInThePast}`, async () => {
+      let historicalCalls = 0;
+      const provider: ActivityProvider = {
+        async getAccountActivity(login) {
+          return queryResult(login, 0, hasActivityInThePast);
+        },
+        async getHistoricalActivity(login) {
+          historicalCalls += 1;
+          throw new GitHubGraphQLAccountError(
+            `Historical data unavailable for ${login}.`,
+          );
+        },
+      };
+
+      const analysis = await analyzeFollowingActivity(
+        [account("quiet")],
+        provider,
+        period,
+      );
+
+      assert.equal(historicalCalls, 1);
+      assert.equal(analysis.results[0]?.status, "NO_RECENT_VISIBLE_ACTIVITY");
+      assert.equal(analysis.results[0]?.lastVisibleActivityAt, null);
+      assert.equal(analysis.results[0]?.historicalLookupStatus, "FAILED");
+      assert.match(
+        analysis.results[0]?.historicalLookupError ?? "",
+        /unavailable/,
+      );
+    });
+  }
 });

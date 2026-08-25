@@ -92,25 +92,20 @@ function candidateDate(result: AccountAuditResult): string {
   if (result.lastVisibleActivityAt !== null) {
     return result.lastVisibleActivityAt;
   }
-  if (result.historicalLookupStatus === "NO_PAST_ACTIVITY") {
-    return "no past activity";
-  }
   if (result.historicalLookupStatus === "FAILED") return "lookup failed";
   return `not found in ${HISTORICAL_LOOKBACK_YEARS}y`;
 }
 
 function candidateRank(result: AccountAuditResult): number {
   switch (result.historicalLookupStatus) {
-    case "NO_PAST_ACTIVITY":
-      return 0;
     case "NOT_FOUND_IN_LOOKBACK":
-      return 1;
+      return 0;
     case "FAILED":
-      return 2;
+      return 1;
     case "FOUND":
-      return 3;
+      return 2;
     default:
-      return 4;
+      return 3;
   }
 }
 

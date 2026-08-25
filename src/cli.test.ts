@@ -4,8 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { HELP } from "./args.js";
-import { checkpointPathFor } from "./checkpoint.js";
+import {
+  checkpointHistoricalResults,
+  checkpointPathFor,
+  checkpointRecentResults,
+  createCheckpoint,
+  loadCheckpoint,
+  recordRecentResults,
+  writeCheckpointAtomic,
+} from "./checkpoint.js";
 import { runCli, TOKEN_REQUIRED_MESSAGE, type CliIO } from "./cli.js";
+import type { FollowedAccount } from "./domain/account.js";
+import {
+  createActivityPeriod,
+  type AccountActivityResult,
+} from "./domain/activity.js";
 
 function emptyFollowingFetch(): typeof fetch {
   return (async () =>
@@ -257,6 +270,161 @@ describe("CLI options", () => {
       };
       assert.equal(Object.keys(saved.completedRecentActivity).length, 25);
       assert.doesNotMatch(await readFile(path, "utf8"), /obvious-test-placeholder/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resume corrects legacy NO_PAST_ACTIVITY without repeating recent and persists the new historical result", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ghost-following-legacy-resume-"));
+    const checkpointRoot = join(root, "checkpoints");
+    const path = checkpointPathFor("octocat", checkpointRoot);
+    const now = new Date("2026-08-24T23:41:55.948Z");
+    const period = createActivityPeriod(now);
+    const accounts: FollowedAccount[] = [
+      {
+        login: "legacy-first",
+        id: 1,
+        type: "User",
+        htmlUrl: "https://github.com/legacy-first",
+      },
+      {
+        login: "legacy-second",
+        id: 2,
+        type: "User",
+        htmlUrl: "https://github.com/legacy-second",
+      },
+    ];
+    const recent: AccountActivityResult[] = accounts.map((value) => ({
+      account: value,
+      status: "NO_RECENT_VISIBLE_ACTIVITY",
+      activity: {
+        login: value.login,
+        periodStart: period.from,
+        periodEnd: period.to,
+        totalContributions: 0,
+        totalCommitContributions: 0,
+        totalIssueContributions: 0,
+        totalPullRequestContributions: 0,
+        totalPullRequestReviewContributions: 0,
+        restrictedContributionsCount: 0,
+        hasAnyContributions: false,
+        hasAnyRestrictedContributions: false,
+        hasActivityInThePast: false,
+      },
+    }));
+    const checkpoint = createCheckpoint("octocat", period, accounts, now);
+    recordRecentResults(checkpoint, recent);
+    for (const item of recent) {
+      (checkpoint.completedHistoricalActivity as Record<string, unknown>)[
+        item.account.login
+      ] = {
+        ...item,
+        lastVisibleActivityAt: null,
+        historicalLookupStatus: "NO_PAST_ACTIVITY",
+      };
+    }
+    await writeCheckpointAtomic(path, checkpoint, now);
+    const graphQLBodies: Array<{
+      query: string;
+      variables: Record<string, string>;
+    }> = [];
+    const fetchMock = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      if (String(input).includes("/following")) {
+        return new Response(
+          JSON.stringify(
+            accounts.map(({ login, id, type, htmlUrl }) => ({
+              login,
+              id,
+              type,
+              html_url: htmlUrl,
+            })),
+          ),
+          {
+            status: 200,
+            headers: {
+              "x-ratelimit-limit": "5000",
+              "x-ratelimit-remaining": "4999",
+            },
+          },
+        );
+      }
+      graphQLBodies.push(JSON.parse(String(init?.body)) as {
+        query: string;
+        variables: Record<string, string>;
+      });
+      if (graphQLBodies.length === 2) {
+        return new Response("", { status: 401 });
+      }
+      return new Response(
+        JSON.stringify({
+          data: {
+            user: {
+              login: "legacy-first",
+              contributionsCollection: {
+                startedAt: "2024-08-24T23:41:55.948Z",
+                endedAt: "2025-08-24T23:41:55.947Z",
+                hasAnyContributions: true,
+                hasAnyRestrictedContributions: false,
+                restrictedContributionsCount: 0,
+                latestRestrictedContributionDate: null,
+                contributionCalendar: {
+                  totalContributions: 1,
+                  weeks: [
+                    {
+                      contributionDays: [
+                        { contributionCount: 1, date: "2025-08-17" },
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+            rateLimit: {
+              cost: 1,
+              limit: 5000,
+              remaining: 4998,
+              resetAt: "2026-08-25T01:00:00.000Z",
+            },
+          },
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+
+    try {
+      const exitCode = await runCli(["octocat", "--resume"], {
+        token: "obvious-test-placeholder",
+        fetch: fetchMock,
+        checkpointRoot,
+        concurrency: 1,
+        now,
+        io: { log() {}, error() {} },
+      });
+
+      assert.equal(exitCode, 1);
+      assert.equal(graphQLBodies.length, 2);
+      assert.match(graphQLBodies[0]?.query ?? "", /HistoricalActivity/);
+      assert.deepEqual(
+        graphQLBodies.map(({ variables }) => variables.login),
+        ["legacy-first", "legacy-second"],
+      );
+      const saved = await loadCheckpoint(path);
+      assert.equal(checkpointRecentResults(saved).length, 2);
+      const historical = checkpointHistoricalResults(saved);
+      const first = historical.find(
+        ({ account: value }) => value.login === "legacy-first",
+      );
+      const second = historical.find(
+        ({ account: value }) => value.login === "legacy-second",
+      ) as unknown as { historicalLookupStatus?: string };
+      assert.equal(first?.historicalLookupStatus, "FOUND");
+      assert.equal(first?.lastVisibleActivityAt, "2025-08-17");
+      assert.equal(first?.activity?.hasActivityInThePast, false);
+      assert.equal(second.historicalLookupStatus, "NO_PAST_ACTIVITY");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

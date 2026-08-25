@@ -33,7 +33,6 @@ export interface AccountActivity {
 export type HistoricalLookupStatus =
   | "FOUND"
   | "NOT_FOUND_IN_LOOKBACK"
-  | "NO_PAST_ACTIVITY"
   | "FAILED";
 
 export interface AccountActivityResult {

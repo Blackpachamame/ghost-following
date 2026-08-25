@@ -62,11 +62,11 @@ it("formats and orders activity details by semantic status", () => {
     type: "User",
     htmlUrl: "https://github.com/not-found",
   };
-  const noPastAccount = {
-    login: "no-past",
+  const failedAccount = {
+    login: "failed",
     id: 5,
     type: "User",
-    htmlUrl: "https://github.com/no-past",
+    htmlUrl: "https://github.com/failed",
   };
   const analysis: ActivityAnalysis = {
     period,
@@ -89,7 +89,7 @@ it("formats and orders activity details by semantic status", () => {
           restrictedContributionsCount: 0,
           hasAnyContributions: true,
           hasAnyRestrictedContributions: false,
-          hasActivityInThePast: true,
+          hasActivityInThePast: false,
         },
       },
       {
@@ -109,7 +109,7 @@ it("formats and orders activity details by semantic status", () => {
           restrictedContributionsCount: 0,
           hasAnyContributions: false,
           hasAnyRestrictedContributions: false,
-          hasActivityInThePast: true,
+          hasActivityInThePast: false,
         },
       },
       {
@@ -133,12 +133,13 @@ it("formats and orders activity details by semantic status", () => {
         },
       },
       {
-        account: noPastAccount,
+        account: failedAccount,
         status: "NO_RECENT_VISIBLE_ACTIVITY",
         lastVisibleActivityAt: null,
-        historicalLookupStatus: "NO_PAST_ACTIVITY",
+        historicalLookupStatus: "FAILED",
+        historicalLookupError: "Historical lookup unavailable.",
         activity: {
-          login: "no-past",
+          login: "failed",
           periodStart: period.from,
           periodEnd: period.to,
           totalContributions: 0,
@@ -179,11 +180,12 @@ it("formats and orders activity details by semantic status", () => {
   assert.match(output, /Eligible users: 5/);
   assert.match(output, /Coverage: 80\.0%/);
   assert.match(output, /USERNAME\s+LAST VISIBLE ACTIVITY\s+PAST ACTIVITY\s+STATUS/);
-  assert.match(output, /no-past\s+no past activity\s+no\s+NO_RECENT_VISIBLE_ACTIVITY/);
-  assert.match(output, /quiet\s+2024-09-17\s+yes\s+NO_RECENT_VISIBLE_ACTIVITY/);
+  assert.doesNotMatch(output, /no past activity/i);
+  assert.match(output, /failed\s+lookup failed\s+no\s+NO_RECENT_VISIBLE_ACTIVITY/);
+  assert.match(output, /quiet\s+2024-09-17\s+no\s+NO_RECENT_VISIBLE_ACTIVITY/);
   assert.match(output, /not-found\s+not found in 5y\s+yes\s+NO_RECENT_VISIBLE_ACTIVITY/);
-  assert.ok(output.indexOf("no-past") < output.indexOf("not-found"));
-  assert.ok(output.indexOf("not-found") < output.indexOf("quiet"));
+  assert.ok(output.indexOf("not-found") < output.indexOf("failed"));
+  assert.ok(output.indexOf("failed") < output.indexOf("quiet"));
   assert.ok(output.indexOf("quiet") < output.indexOf("unknown"));
   assert.ok(output.indexOf("unknown") < output.indexOf("active"));
   assert.match(output, /Remaining: 4997 \/ 5000/);

@@ -182,6 +182,14 @@ function mapSavedResults(
   return result;
 }
 
+function isReusableHistoricalResult(result: AccountActivityResult): boolean {
+  return (
+    result.historicalLookupStatus === "FOUND" ||
+    result.historicalLookupStatus === "NOT_FOUND_IN_LOOKBACK" ||
+    result.historicalLookupStatus === "FAILED"
+  );
+}
+
 function successfulWorkResult(
   account: FollowedAccount,
   item: Extract<BatchAccountActivityItem, { status: "SUCCESS" }>,
@@ -430,15 +438,6 @@ async function completeHistoricalResult(
   if (recent.activity === undefined) {
     throw new Error("Historical candidate is missing recent activity data.");
   }
-  if (!recent.activity.hasActivityInThePast) {
-    return {
-      result: {
-        ...recent,
-        lastVisibleActivityAt: null,
-        historicalLookupStatus: "NO_PAST_ACTIVITY",
-      },
-    };
-  }
 
   let historicalRateLimit = observedRateLimit;
   try {
@@ -569,6 +568,11 @@ export async function analyzeFollowingActivity(
     options.completedHistoricalActivity,
     eligibleAccounts,
   );
+  for (const [key, result] of historicalByLogin) {
+    if (!isReusableHistoricalResult(result)) {
+      historicalByLogin.delete(key);
+    }
+  }
   const pendingHistorical = historicalCandidates.filter(
     ({ account }) => !historicalByLogin.has(loginKey(account.login)),
   );

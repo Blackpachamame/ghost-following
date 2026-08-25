@@ -145,7 +145,7 @@ Para cada cuenta seguida con `type === "User"`, se consulta:
 - pull requests;
 - reviews de pull requests;
 - señal y conteo anonimizado de contribuciones restringidas, cuando GitHub los expone;
-- `hasActivityInThePast`, para saber si GitHub afirma que existe actividad anterior al período consultado.
+- `hasActivityInThePast`, como señal informativa cruda devuelta por GitHub; no se usa para decidir si existe actividad histórica visible.
 
 Las organizaciones y cualquier otro tipo de cuenta quedan fuera del universo elegible. No se aplican heurísticas para bots, machine users o managed users.
 
@@ -179,7 +179,7 @@ Las contribuciones privadas sólo se usan como señal cuando la persona habilit�
 
 ## Last visible activity
 
-Sólo para cuentas clasificadas como `NO_RECENT_VISIBLE_ACTIVITY` y con `hasActivityInThePast === true`, la herramienta consulta ventanas históricas explícitas con `ContributionsCollection(from, to)`. Comienza inmediatamente antes del período reciente, sin solaparlo, avanza hacia atrás una ventana anual por vez y se detiene en cuanto encuentra actividad. Si `hasActivityInThePast === false`, no realiza ninguna consulta histórica.
+Para todas las cuentas clasificadas como `NO_RECENT_VISIBLE_ACTIVITY`, la herramienta consulta ventanas históricas explícitas con `ContributionsCollection(from, to)`. Comienza inmediatamente antes del período reciente, sin solaparlo, avanza hacia atrás una ventana anual por vez y se detiene en cuanto encuentra actividad. `hasActivityInThePast` se conserva en reportes y exports como metadata informativa, pero no controla este lookup: se observó que una ventana explícita puede encontrar actividad visible aunque esa señal sea `false`.
 
 En cada ventana elige la fecha más reciente entre:
 
@@ -191,11 +191,12 @@ La decisión no depende sólo de `totalContributions`: también considera `hasAn
 El lookback es de 5 años, definido por `HISTORICAL_LOOKBACK_YEARS`. El lookup distingue estos resultados:
 
 - `FOUND`: encontró una fecha pública o restringida visible;
-- `NOT_FOUND_IN_LOOKBACK`: GitHub afirma actividad pasada, pero ninguna de las cinco ventanas contiene una fecha visible;
-- `NO_PAST_ACTIVITY`: GitHub afirma que no hay actividad anterior y no se consultan ventanas;
+- `NOT_FOUND_IN_LOOKBACK`: ninguna de las cinco ventanas contiene una fecha visible;
 - `FAILED`: falló la búsqueda histórica de esa cuenta.
 
-Los dos últimos resultados sin fecha se muestran como `no past activity`, `not found in 5y` o `lookup failed`, según corresponda. Un fallo histórico conserva el estado principal `NO_RECENT_VISIBLE_ACTIVITY`.
+Los resultados sin fecha se muestran como `not found in 5y` o `lookup failed`, según corresponda. `NOT_FOUND_IN_LOOKBACK` no demuestra ausencia histórica absoluta: puede existir actividad anterior al lookback, privada o no visible para quien ejecuta la consulta. Un fallo histórico conserva el estado principal `NO_RECENT_VISIBLE_ACTIVITY`.
+
+Reports generados antes de esta corrección pueden contener el valor legacy `NO_PAST_ACTIVITY`. Los checkpoints schema 1 que lo contengan siguen siendo compatibles: `--resume` conserva el resultado recent y vuelve a ejecutar sólo el lookup historical de esa cuenta.
 
 > `Last visible activity` means the most recent contribution activity GitHub exposes to the viewer within the configured historical lookback. It does not prove that the user was inactive after that date.
 
@@ -235,9 +236,9 @@ Coverage: 100.0%
 Candidates
 
 USERNAME  LAST VISIBLE ACTIVITY  PAST ACTIVITY  STATUS
-new-user  no past activity       no             NO_RECENT_VISIBLE_ACTIVITY
-quiet     not found in 5y        yes            NO_RECENT_VISIBLE_ACTIVITY
-bob       2024-09-17             yes            NO_RECENT_VISIBLE_ACTIVITY
+new-user  not found in 5y        no             NO_RECENT_VISIBLE_ACTIVITY
+quiet     lookup failed          yes            NO_RECENT_VISIBLE_ACTIVITY
+bob       2024-09-17             no             NO_RECENT_VISIBLE_ACTIVITY
 
 Other activity details
 
@@ -245,7 +246,7 @@ USERNAME  TOTAL  COMMITS  PRS  REVIEWS  ISSUES  RESTRICTED  STATUS
 alice     824    710      42   61       11      220         ACTIVE
 ```
 
-Los candidatos sin actividad pasada aparecen primero, seguidos por los que tienen actividad pasada no encontrada dentro del lookback, los lookups fallidos y finalmente las fechas desde la más antigua hasta la más reciente. El resto se ordena por `INSUFFICIENT_VISIBILITY`, `UNKNOWN` y `ACTIVE`; actualmente el producto no genera el primer estado.
+Los candidatos sin fecha encontrada dentro del lookback aparecen primero, seguidos por los lookups fallidos y finalmente los resultados con fecha desde la más antigua hasta la más reciente. El resto se ordena por `INSUFFICIENT_VISIBILITY`, `UNKNOWN` y `ACTIVE`; actualmente el producto no genera el primer estado.
 
 ## Cuentas grandes y batching
 
@@ -302,7 +303,7 @@ Si un batch reciente agota los tres intentos con HTTP 502 o 504, muestra los log
 
 El incidente contiene únicamente timestamp, usuario auditado, período recent, status HTTP, intentos y logins del batch. No contiene token, headers, request GraphQL, calendarios ni responses. El archivo es local, acumulativo y está cubierto por el ignore de `.ghost-following/`. Si no puede escribirse, la CLI muestra una advertencia sin cambiar el comportamiento de recuperación o error del audit.
 
-La búsqueda histórica se ejecuta únicamente para candidatos sin actividad reciente cuyo `hasActivityInThePast` sea verdadero. Las ventanas de una misma cuenta se consultan secuencialmente para poder detenerse en el primer resultado; distintas cuentas sí comparten el pool de cuatro workers. Se generan como máximo 5 queries adicionales por candidato y ninguna cuando la señal de actividad pasada es falsa. Con 30 candidatos, el peor caso teórico es de unas 150 queries históricas adicionales.
+La búsqueda histórica se ejecuta para todos los candidatos sin actividad reciente. Las ventanas de una misma cuenta se consultan secuencialmente para poder detenerse en el primer resultado; distintas cuentas sí comparten el pool de cuatro workers. Se generan como máximo 5 queries adicionales por candidato. Con 30 candidatos, el peor caso teórico es de unas 150 queries históricas adicionales.
 
 El coste GraphQL no se presupone; se muestra el último coste observado que GitHub devuelve.
 
