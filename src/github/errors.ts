@@ -90,3 +90,27 @@ export class GitHubGraphQLFatalError extends GitHubError {
     super(message, options);
   }
 }
+
+export type GitHubGraphQLResponseBodyErrorCategory =
+  | "INVALID_JSON"
+  | "BODY_READ_FAILED";
+
+export class GitHubGraphQLResponseBodyError extends GitHubError {
+  override readonly name = "GitHubGraphQLResponseBodyError";
+
+  constructor(
+    readonly category: GitHubGraphQLResponseBodyErrorCategory,
+    readonly status: number,
+    readonly attempts: number,
+    options?: ErrorOptions,
+  ) {
+    const attemptsSuffix =
+      attempts > 1 ? ` after ${attempts} attempts` : "";
+    super(
+      category === "INVALID_JSON"
+        ? `GitHub GraphQL returned a body that is not valid JSON${attemptsSuffix}.`
+        : `GitHub GraphQL response body could not be read${attemptsSuffix}.`,
+      options,
+    );
+  }
+}

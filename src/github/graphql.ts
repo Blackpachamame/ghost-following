@@ -9,12 +9,14 @@ import {
   GitHubAuthenticationError,
   GitHubGraphQLAccountError,
   GitHubGraphQLFatalError,
+  GitHubGraphQLResponseBodyError,
   GitHubHttpError,
   GitHubNetworkError,
   GitHubRateLimitError,
   type RateLimitDetails,
 } from "./errors.js";
 import {
+  isRetryableTransportError,
   requestWithTransientRetry,
   TransientTransportRetryExhaustedError,
   type Sleep,
@@ -473,6 +475,60 @@ export function parseHistoricalActivityResponse(
   }
 }
 
+type ProcessedGraphQLResponse =
+  | { kind: "HTTP_ERROR" }
+  | { kind: "JSON"; payload: unknown };
+
+async function processGraphQLResponse(
+  response: Response,
+): Promise<ProcessedGraphQLResponse> {
+  if (!response.ok) return { kind: "HTTP_ERROR" };
+
+  let body: string;
+  try {
+    body = await response.text();
+  } catch (error) {
+    throw new GitHubGraphQLResponseBodyError(
+      "BODY_READ_FAILED",
+      response.status,
+      1,
+      { cause: error },
+    );
+  }
+
+  try {
+    return { kind: "JSON", payload: JSON.parse(body) as unknown };
+  } catch {
+    throw new GitHubGraphQLResponseBodyError(
+      "INVALID_JSON",
+      response.status,
+      1,
+    );
+  }
+}
+
+function isRetryableGraphQLResponseBodyError(error: unknown): boolean {
+  return (
+    error instanceof GitHubGraphQLResponseBodyError &&
+    (error.category === "INVALID_JSON" || isRetryableTransportError(error))
+  );
+}
+
+function createExhaustedGraphQLResponseBodyError(
+  error: unknown,
+  attempts: number,
+  response: Response,
+): GitHubGraphQLResponseBodyError {
+  return new GitHubGraphQLResponseBodyError(
+    error instanceof GitHubGraphQLResponseBodyError
+      ? error.category
+      : "BODY_READ_FAILED",
+    response.status,
+    attempts,
+    { cause: error },
+  );
+}
+
 export class GitHubGraphQLClient {
   readonly #token: string;
   readonly #fetch: typeof globalThis.fetch;
@@ -531,6 +587,7 @@ export class GitHubGraphQLClient {
   ): Promise<unknown> {
     let response: Response;
     let attempts: number;
+    let processed: ProcessedGraphQLResponse;
     const body = JSON.stringify({ query, variables });
     try {
       const retried = await requestWithTransientRetry(
@@ -545,11 +602,19 @@ export class GitHubGraphQLClient {
             },
             body,
           }),
-        this.#sleep === undefined ? {} : { sleep: this.#sleep },
+        {
+          ...(this.#sleep === undefined ? {} : { sleep: this.#sleep }),
+          processResponse: processGraphQLResponse,
+          isRetryableProcessError: isRetryableGraphQLResponseBodyError,
+          createProcessRetryExhaustedError:
+            createExhaustedGraphQLResponseBodyError,
+        },
       );
       response = retried.response;
       attempts = retried.attempts;
+      processed = retried.result;
     } catch (error) {
+      if (error instanceof GitHubGraphQLResponseBodyError) throw error;
       const exhausted =
         error instanceof TransientTransportRetryExhaustedError
           ? ` after ${error.attempts} attempts`
@@ -590,16 +655,12 @@ export class GitHubGraphQLClient {
       );
     }
 
-    let payload: unknown;
-    try {
-      payload = await response.json();
-    } catch (error) {
+    if (processed.kind !== "JSON") {
       throw new GitHubGraphQLFatalError(
-        "GitHub GraphQL returned a body that is not valid JSON.",
-        { cause: error },
+        "GitHub GraphQL response body was not processed.",
       );
     }
 
-    return payload;
+    return processed.payload;
   }
 }

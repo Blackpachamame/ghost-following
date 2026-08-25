@@ -104,6 +104,11 @@ type RecentBatchFailureHooks = Pick<
   "onRecentBatchFailed" | "onRecentBatchFailureReportingError"
 >;
 
+type RecentWorkResolved = (
+  work: readonly WorkResult[],
+  rateLimit: GraphQLRateLimit | undefined,
+) => Promise<void>;
+
 function loginKey(login: string): string {
   return login.toLocaleLowerCase("en-US");
 }
@@ -211,6 +216,7 @@ async function resolveBatchWithFallback(
   period: ActivityPeriod,
   observedRateLimit: GraphQLRateLimit | undefined,
   failureHooks: RecentBatchFailureHooks,
+  onWorkResolved: RecentWorkResolved,
 ): Promise<{ work: WorkResult[]; rateLimit?: GraphQLRateLimit }> {
   ensureQuota(observedRateLimit);
 
@@ -253,6 +259,7 @@ async function resolveBatchWithFallback(
       observedRateLimit,
       ...work.map((item) => item.rateLimit),
     ]);
+    await onWorkResolved(work, rateLimit);
     return rateLimit === undefined ? { work } : { work, rateLimit };
   }
 
@@ -280,8 +287,49 @@ async function resolveBatchWithFallback(
         try {
           failureHooks.onRecentBatchFailureReportingError?.(reportingError);
         } catch {
-          // Reporting must never replace the original exhausted HTTP error.
+          // Reporting must never change handling of the exhausted HTTP request.
         }
+      }
+      if (error.status === 502 || error.status === 504) {
+        if (accounts.length === 1) {
+          const work = [
+            unknownWorkResult(
+              accounts[0]!,
+              `Recent activity could not be evaluated after HTTP ${error.status} exhausted ${error.attempts} attempts.`,
+              observedRateLimit,
+            ),
+          ];
+          await onWorkResolved(work, observedRateLimit);
+          return observedRateLimit === undefined
+            ? { work }
+            : { work, rateLimit: observedRateLimit };
+        }
+
+        const midpoint = Math.floor(accounts.length / 2);
+        const groups = [
+          accounts.slice(0, midpoint),
+          accounts.slice(midpoint),
+        ];
+        const work: WorkResult[] = [];
+        let fallbackRateLimit = observedRateLimit;
+        for (const group of groups) {
+          const resolved = await resolveBatchWithFallback(
+            group,
+            client,
+            period,
+            fallbackRateLimit,
+            failureHooks,
+            onWorkResolved,
+          );
+          work.push(...resolved.work);
+          fallbackRateLimit = selectLatestRateLimit([
+            fallbackRateLimit,
+            resolved.rateLimit,
+          ]);
+        }
+        return fallbackRateLimit === undefined
+          ? { work }
+          : { work, rateLimit: fallbackRateLimit };
       }
     }
     throw error;
@@ -310,17 +358,21 @@ async function resolveBatchWithFallback(
     }
   }
 
+  if (work.length > 0) {
+    await onWorkResolved(work, rateLimit);
+  }
+
   if (resourceFailures.length === 0) {
     return rateLimit === undefined ? { work } : { work, rateLimit };
   }
   if (accounts.length === 1 && resourceFailures.length === 1) {
-    work.push(
-      unknownWorkResult(
-        resourceFailures[0]!,
-        "Resource limits for this query exceeded.",
-        rateLimit,
-      ),
+    const singletonWork = unknownWorkResult(
+      resourceFailures[0]!,
+      "Resource limits for this query exceeded.",
+      rateLimit,
     );
+    work.push(singletonWork);
+    await onWorkResolved([singletonWork], rateLimit);
     return rateLimit === undefined ? { work } : { work, rateLimit };
   }
 
@@ -331,6 +383,7 @@ async function resolveBatchWithFallback(
       period,
       rateLimit,
       failureHooks,
+      onWorkResolved,
     );
     work.push(...resolved.work);
     const fallbackRateLimit = selectLatestRateLimit([
@@ -355,6 +408,7 @@ async function resolveBatchWithFallback(
       period,
       fallbackRateLimit,
       failureHooks,
+      onWorkResolved,
     );
     work.push(...resolved.work);
     fallbackRateLimit = selectLatestRateLimit([
@@ -466,6 +520,26 @@ export async function analyzeFollowingActivity(
     ({ login }) => !recentByLogin.has(loginKey(login)),
   );
 
+  const completeRecentWork: RecentWorkResolved = async (work, rateLimit) => {
+    if (work.length === 0) return;
+    latestRateLimit = selectLatestRateLimit([latestRateLimit, rateLimit]);
+    const results = work.map(({ result }) => result);
+    for (const result of results) {
+      const key = loginKey(result.account.login);
+      if (recentByLogin.has(key)) {
+        throw new Error("Recent activity result was resolved more than once.");
+      }
+      recentByLogin.set(key, result);
+    }
+    recentCompleted += results.length;
+    await options.onRecentBatchCompleted?.(
+      results,
+      recentCompleted,
+      eligibleAccounts.length,
+      latestRateLimit,
+    );
+  };
+
   for (const batch of chunkValues(pendingRecent, ACTIVITY_BATCH_SIZE)) {
     const resolved = await resolveBatchWithFallback(
       batch,
@@ -473,21 +547,12 @@ export async function analyzeFollowingActivity(
       period,
       latestRateLimit,
       options,
+      completeRecentWork,
     );
     latestRateLimit = selectLatestRateLimit([
       latestRateLimit,
       resolved.rateLimit,
     ]);
-    for (const item of resolved.work) {
-      recentByLogin.set(loginKey(item.result.account.login), item.result);
-    }
-    recentCompleted += batch.length;
-    await options.onRecentBatchCompleted?.(
-      resolved.work.map(({ result }) => result),
-      recentCompleted,
-      eligibleAccounts.length,
-      latestRateLimit,
-    );
   }
 
   const recentResults = eligibleAccounts.map((account) => {

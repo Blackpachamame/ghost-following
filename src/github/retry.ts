@@ -9,9 +9,23 @@ export interface RetryOptions {
   sleep?: Sleep;
 }
 
+export interface ProcessedRetryOptions<T> extends RetryOptions {
+  processResponse(response: Response): Promise<T>;
+  isRetryableProcessError(error: unknown): boolean;
+  createProcessRetryExhaustedError(
+    error: unknown,
+    attempts: number,
+    response: Response,
+  ): Error;
+}
+
 export interface RetriedResponse {
   response: Response;
   attempts: number;
+}
+
+export interface RetriedProcessedResponse<T> extends RetriedResponse {
+  result: T;
 }
 
 export class TransientTransportRetryExhaustedError extends Error {
@@ -75,10 +89,24 @@ async function discardResponse(response: Response): Promise<void> {
   await response.body?.cancel().catch(() => undefined);
 }
 
-export async function requestWithTransientRetry(
+function processesResponse<T>(
+  options: RetryOptions | ProcessedRetryOptions<T>,
+): options is ProcessedRetryOptions<T> {
+  return "processResponse" in options;
+}
+
+export function requestWithTransientRetry(
   request: () => Promise<Response>,
-  options: RetryOptions = {},
-): Promise<RetriedResponse> {
+  options?: RetryOptions,
+): Promise<RetriedResponse>;
+export function requestWithTransientRetry<T>(
+  request: () => Promise<Response>,
+  options: ProcessedRetryOptions<T>,
+): Promise<RetriedProcessedResponse<T>>;
+export async function requestWithTransientRetry<T>(
+  request: () => Promise<Response>,
+  options: RetryOptions | ProcessedRetryOptions<T> = {},
+): Promise<RetriedResponse | RetriedProcessedResponse<T>> {
   const sleep = options.sleep ?? defaultSleep;
 
   for (let attempt = 1; attempt <= TRANSIENT_MAX_ATTEMPTS; attempt += 1) {
@@ -97,15 +125,34 @@ export async function requestWithTransientRetry(
     }
 
     if (
-      !TRANSIENT_HTTP_STATUSES.has(response.status) ||
-      attempt === TRANSIENT_MAX_ATTEMPTS
+      TRANSIENT_HTTP_STATUSES.has(response.status) &&
+      attempt < TRANSIENT_MAX_ATTEMPTS
     ) {
+      const delayMs = retryDelayMs(response, attempt);
+      await discardResponse(response);
+      await sleep(delayMs);
+      continue;
+    }
+
+    if (!processesResponse(options)) {
       return { response, attempts: attempt };
     }
 
-    const delayMs = retryDelayMs(response, attempt);
-    await discardResponse(response);
-    await sleep(delayMs);
+    try {
+      const result = await options.processResponse(response);
+      return { response, attempts: attempt, result };
+    } catch (error) {
+      if (!options.isRetryableProcessError(error)) throw error;
+      if (attempt === TRANSIENT_MAX_ATTEMPTS) {
+        throw options.createProcessRetryExhaustedError(
+          error,
+          attempt,
+          response,
+        );
+      }
+      await discardResponse(response);
+      await sleep(TRANSIENT_BACKOFF_MS[attempt - 1] ?? 0);
+    }
   }
 
   throw new Error("Transient retry loop ended unexpectedly.");

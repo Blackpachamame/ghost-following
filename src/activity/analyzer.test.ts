@@ -8,8 +8,14 @@ import {
   type AccountActivityResult,
   type ActivityPeriod,
 } from "../domain/activity.js";
-import { GitHubGraphQLAccountError } from "../github/errors.js";
-import { GitHubRateLimitError } from "../github/errors.js";
+import {
+  GitHubAuthenticationError,
+  GitHubGraphQLAccountError,
+  GitHubGraphQLFatalError,
+  GitHubHttpError,
+  GitHubNetworkError,
+  GitHubRateLimitError,
+} from "../github/errors.js";
 import type { AccountActivityQueryResult } from "../github/graphql.js";
 import {
   analyzeFollowingActivity,
@@ -131,6 +137,408 @@ describe("productive recent batching", () => {
 
     assert.deepEqual(calls, [["ok", "retry"], ["retry"]]);
     assert.equal(analysis.counts.ACTIVE, 2);
+  });
+
+  for (const status of [502, 504] as const) {
+    it(`recovers an exhausted HTTP ${status} batch as sequential 12 + 13`, async () => {
+      const calls: string[][] = [];
+      const diagnosed: number[] = [];
+      const progress: number[] = [];
+      const provider: ActivityProvider = {
+        async getAccountActivities(logins) {
+          calls.push([...logins]);
+          if (logins.length === 25) {
+            throw new GitHubHttpError(status, "", undefined, 3);
+          }
+          return batchSuccess(logins);
+        },
+        getHistoricalActivity: historicalNeverCalled,
+      };
+      const accounts = Array.from({ length: 25 }, (_, index) =>
+        account(`user-${index}`, "User", index + 1),
+      );
+
+      const analysis = await analyzeFollowingActivity(accounts, provider, period, {
+        onRecentBatchFailed(failure) {
+          diagnosed.push(failure.logins.length);
+        },
+        onRecentBatchCompleted(_results, completed) {
+          progress.push(completed);
+        },
+      });
+
+      assert.deepEqual(calls.map(({ length }) => length), [25, 12, 13]);
+      assert.deepEqual(diagnosed, [25]);
+      assert.deepEqual(progress, [12, 25]);
+      assert.equal(analysis.counts.ACTIVE, 25);
+      assert.deepEqual(
+        analysis.results.map(({ account: value }) => value.login),
+        accounts.map(({ login }) => login),
+      );
+    });
+  }
+
+  it("returns to the production batch size after recovering one HTTP timeout batch", async () => {
+    const calls: number[] = [];
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins) {
+        calls.push(logins.length);
+        if (calls.length === 1) {
+          throw new GitHubHttpError(502, "", undefined, 3);
+        }
+        return batchSuccess(logins);
+      },
+      getHistoricalActivity: historicalNeverCalled,
+    };
+    const accounts = Array.from({ length: 50 }, (_, index) =>
+      account(`fixed-batch-${index}`, "User", index + 1),
+    );
+
+    const analysis = await analyzeFollowingActivity(accounts, provider, period);
+
+    assert.deepEqual(calls, [25, 12, 13, 25]);
+    assert.equal(analysis.counts.ACTIVE, 50);
+  });
+
+  it("recursively splits only the HTTP timeout branches that exhaust retries", async () => {
+    const calls: string[][] = [];
+    const diagnosed: number[] = [];
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins) {
+        calls.push([...logins]);
+        if (logins.length === 25 || logins.length === 13) {
+          throw new GitHubHttpError(504, "", undefined, 3);
+        }
+        return batchSuccess(logins);
+      },
+      getHistoricalActivity: historicalNeverCalled,
+    };
+    const accounts = Array.from({ length: 25 }, (_, index) =>
+      account(`nested-${index}`, "User", index + 1),
+    );
+
+    const analysis = await analyzeFollowingActivity(accounts, provider, period, {
+      onRecentBatchFailed(failure) {
+        diagnosed.push(failure.logins.length);
+      },
+    });
+
+    assert.deepEqual(calls.map(({ length }) => length), [25, 12, 13, 6, 7]);
+    assert.deepEqual(diagnosed, [25, 13]);
+    assert.equal(analysis.counts.ACTIVE, 25);
+    assert.equal(new Set(analysis.results.map(({ account: value }) => value.login)).size, 25);
+  });
+
+  for (const status of [502, 504] as const) {
+    it(`marks an exhausted singleton HTTP ${status} UNKNOWN without historical lookup`, async () => {
+      let historicalCalls = 0;
+      const completed: AccountActivityResult[] = [];
+      const provider: ActivityProvider = {
+        async getAccountActivities() {
+          throw new GitHubHttpError(status, "", undefined, 3);
+        },
+        async getHistoricalActivity() {
+          historicalCalls += 1;
+          throw new Error("Historical lookup must not run for UNKNOWN.");
+        },
+      };
+
+      const analysis = await analyzeFollowingActivity(
+        [account("timeout-singleton")],
+        provider,
+        period,
+        {
+          onRecentBatchCompleted(results) {
+            completed.push(...results);
+          },
+        },
+      );
+
+      assert.equal(analysis.results[0]?.status, "UNKNOWN");
+      assert.match(analysis.results[0]?.error ?? "", new RegExp(`HTTP ${status}`));
+      assert.equal(analysis.coverage, 0);
+      assert.equal(historicalCalls, 0);
+      assert.deepEqual(completed, analysis.results);
+    });
+  }
+
+  it("continues after two distinct singleton HTTP timeout failures", async () => {
+    const calls: string[][] = [];
+    const diagnosed: number[] = [];
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins) {
+        calls.push([...logins]);
+        throw new GitHubHttpError(504, "", undefined, 3);
+      },
+      getHistoricalActivity: historicalNeverCalled,
+    };
+
+    const analysis = await analyzeFollowingActivity(
+      [account("left", "User", 1), account("right", "User", 2)],
+      provider,
+      period,
+      {
+        onRecentBatchFailed(failure) {
+          diagnosed.push(failure.logins.length);
+        },
+      },
+    );
+
+    assert.deepEqual(calls, [["left", "right"], ["left"], ["right"]]);
+    assert.deepEqual(diagnosed, [2, 1, 1]);
+    assert.equal(analysis.counts.UNKNOWN, 2);
+    assert.equal(analysis.coverage, 0);
+  });
+
+  it("keeps exhausted HTTP 503 fatal and does not split it", async () => {
+    const original = new GitHubHttpError(503, "Service Unavailable", undefined, 3);
+    const calls: string[][] = [];
+    const diagnosed: number[] = [];
+    const accounts = Array.from({ length: 25 }, (_, index) =>
+      account(`unavailable-${index}`, "User", index + 1),
+    );
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins) {
+        calls.push([...logins]);
+        throw original;
+      },
+      getHistoricalActivity: historicalNeverCalled,
+    };
+
+    await assert.rejects(
+      analyzeFollowingActivity(accounts, provider, period, {
+        onRecentBatchFailed(failure) {
+          diagnosed.push(failure.logins.length);
+        },
+      }),
+      (error) => error === original,
+    );
+    assert.deepEqual(calls.map(({ length }) => length), [25]);
+    assert.deepEqual(diagnosed, [25]);
+  });
+
+  it("does not split excluded HTTP, auth, rate-limit, parsing or transport errors", async () => {
+    const errors = [
+      new GitHubAuthenticationError(),
+      new GitHubRateLimitError({ remaining: 0 }, 403),
+      new GitHubRateLimitError({ remaining: 0 }, 429),
+      new GitHubNetworkError("Could not reach GitHub after 3 attempts."),
+      new GitHubGraphQLFatalError("Invalid GraphQL response."),
+      new GitHubHttpError(500, "Internal Server Error", undefined, 3),
+      new GitHubHttpError(504, "Gateway Timeout", undefined, 2),
+      new TypeError("Generic fetch failure."),
+    ];
+
+    for (const original of errors) {
+      let calls = 0;
+      let diagnosed = false;
+      const provider: ActivityProvider = {
+        async getAccountActivities() {
+          calls += 1;
+          throw original;
+        },
+        getHistoricalActivity: historicalNeverCalled,
+      };
+      await assert.rejects(
+        analyzeFollowingActivity(
+          [account("first", "User", 1), account("second", "User", 2)],
+          provider,
+          period,
+          {
+            onRecentBatchFailed() {
+              diagnosed = true;
+            },
+          },
+        ),
+        (error) => error === original,
+      );
+      assert.equal(calls, 1);
+      assert.equal(diagnosed, false);
+    }
+  });
+
+  it("composes RESOURCE_LIMIT splitting followed by HTTP timeout splitting", async () => {
+    const calls: number[] = [];
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins) {
+        calls.push(logins.length);
+        if (logins.length === 25) return batchResourceLimit(logins);
+        if (logins.length === 13) {
+          throw new GitHubHttpError(504, "", undefined, 3);
+        }
+        return batchSuccess(logins);
+      },
+      getHistoricalActivity: historicalNeverCalled,
+    };
+    const accounts = Array.from({ length: 25 }, (_, index) =>
+      account(`resource-http-${index}`, "User", index + 1),
+    );
+
+    const analysis = await analyzeFollowingActivity(accounts, provider, period);
+
+    assert.deepEqual(calls, [25, 12, 13, 6, 7]);
+    assert.equal(analysis.counts.ACTIVE, 25);
+  });
+
+  it("composes HTTP timeout splitting followed by RESOURCE_LIMIT splitting", async () => {
+    const calls: string[][] = [];
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins) {
+        calls.push([...logins]);
+        if (logins.length === 25) {
+          throw new GitHubHttpError(502, "", undefined, 3);
+        }
+        if (logins.length === 12) return batchResourceLimit(logins);
+        return batchSuccess(logins);
+      },
+      getHistoricalActivity: historicalNeverCalled,
+    };
+    const accounts = Array.from({ length: 25 }, (_, index) =>
+      account(`http-resource-${index}`, "User", index + 1),
+    );
+
+    const analysis = await analyzeFollowingActivity(accounts, provider, period);
+
+    assert.deepEqual(calls.map(({ length }) => length), [25, 12, 6, 6, 13]);
+    assert.equal(analysis.counts.ACTIVE, 25);
+    const terminalLogins = calls.slice(2).flat();
+    assert.equal(new Set(terminalLogins).size, 25);
+  });
+
+  it("publishes a successful left branch before a fatal right branch and resumes without it", async () => {
+    const fatal = new GitHubRateLimitError({ remaining: 0 }, 429);
+    const persisted: AccountActivityResult[] = [];
+    const progress: number[] = [];
+    const accounts = Array.from({ length: 25 }, (_, index) =>
+      account(`durable-${index}`, "User", index + 1),
+    );
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins) {
+        if (logins.length === 25) {
+          throw new GitHubHttpError(504, "", undefined, 3);
+        }
+        if (logins.length === 12) return batchSuccess(logins);
+        throw fatal;
+      },
+      getHistoricalActivity: historicalNeverCalled,
+    };
+
+    await assert.rejects(
+      analyzeFollowingActivity(accounts, provider, period, {
+        onRecentBatchCompleted(results, completed) {
+          persisted.push(...results);
+          progress.push(completed);
+        },
+      }),
+      (error) => error === fatal,
+    );
+    assert.equal(persisted.length, 12);
+    assert.deepEqual(progress, [12]);
+
+    const resumedCalls: string[][] = [];
+    const resumed = await analyzeFollowingActivity(
+      accounts,
+      {
+        async getAccountActivities(logins) {
+          resumedCalls.push([...logins]);
+          return batchSuccess(logins);
+        },
+        getHistoricalActivity: historicalNeverCalled,
+      },
+      period,
+      { completedRecentActivity: persisted },
+    );
+    assert.deepEqual(resumedCalls, [accounts.slice(12).map(({ login }) => login)]);
+    assert.equal(resumed.counts.ACTIVE, 25);
+  });
+
+  it("persists singleton timeout UNKNOWN before a later fatal and skips it on resume", async () => {
+    const fatal = new GitHubRateLimitError({ remaining: 0 }, 429);
+    const persisted: AccountActivityResult[] = [];
+    const accounts = [
+      account("durable-unknown", "User", 1),
+      account("later-fatal", "User", 2),
+    ];
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins) {
+        if (logins.length === 2 || logins[0] === "durable-unknown") {
+          throw new GitHubHttpError(504, "", undefined, 3);
+        }
+        throw fatal;
+      },
+      getHistoricalActivity: historicalNeverCalled,
+    };
+
+    await assert.rejects(
+      analyzeFollowingActivity(accounts, provider, period, {
+        onRecentBatchCompleted(results) {
+          persisted.push(...results);
+        },
+      }),
+      (error) => error === fatal,
+    );
+    assert.equal(persisted.length, 1);
+    assert.equal(persisted[0]?.status, "UNKNOWN");
+
+    const resumedCalls: string[][] = [];
+    const resumed = await analyzeFollowingActivity(
+      accounts,
+      {
+        async getAccountActivities(logins) {
+          resumedCalls.push([...logins]);
+          return batchSuccess(logins);
+        },
+        getHistoricalActivity: historicalNeverCalled,
+      },
+      period,
+      { completedRecentActivity: persisted },
+    );
+    assert.deepEqual(resumedCalls, [["later-fatal"]]);
+    assert.equal(resumed.counts.UNKNOWN, 1);
+    assert.equal(resumed.counts.ACTIVE, 1);
+    assert.equal(resumed.coverage, 50);
+  });
+
+  it("counts mixed successful aliases and singleton timeout UNKNOWN exactly once", async () => {
+    const completed: number[] = [];
+    const accounts = Array.from({ length: 11 }, (_, index) =>
+      account(`coverage-${index}`, "User", index + 1),
+    );
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins) {
+        if (logins.length === 1) {
+          throw new GitHubHttpError(502, "", undefined, 3);
+        }
+        return {
+          items: logins.map((login, index) =>
+            index === logins.length - 1
+              ? {
+                  login,
+                  status: "RESOURCE_LIMIT" as const,
+                  error: "Resource limits for this query exceeded.",
+                }
+              : {
+                  login,
+                  status: "SUCCESS" as const,
+                  activity: queryResult(login, 1).activity,
+                },
+          ),
+          rateLimit: rateLimit(4900),
+        };
+      },
+      getHistoricalActivity: historicalNeverCalled,
+    };
+
+    const analysis = await analyzeFollowingActivity(accounts, provider, period, {
+      onRecentBatchCompleted(_results, count) {
+        completed.push(count);
+      },
+    });
+
+    assert.deepEqual(completed, [10, 11]);
+    assert.equal(analysis.counts.ACTIVE, 10);
+    assert.equal(analysis.counts.UNKNOWN, 1);
+    assert.equal(analysis.coverage, (10 / 11) * 100);
   });
 
   it("resumes completed recent and historical results and only requests pending users", async () => {

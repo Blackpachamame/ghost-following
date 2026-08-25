@@ -109,13 +109,28 @@ export function createRecentBatchFailureIncident(
 export function formatRecentBatchFailure(
   failure: RecentBatchHttpFailure,
 ): string {
-  return [
-    "Recent batch failed after " + failure.attempts + " attempts",
+  const lines = [
+    "Recent batch exhausted retries after " + failure.attempts + " attempts",
     "HTTP status: " + failure.httpStatus,
     "Batch size: " + failure.logins.length,
     "Users:",
     ...failure.logins.map((login) => "  " + safeTerminalLogin(login)),
-  ].join("\n");
+  ];
+  if (failure.httpStatus === 502 || failure.httpStatus === 504) {
+    lines.push("");
+    if (failure.logins.length > 1) {
+      const leftSize = Math.floor(failure.logins.length / 2);
+      lines.push(
+        `Retry fallback: splitting batch into ${leftSize} + ${failure.logins.length - leftSize}.`,
+      );
+    } else {
+      lines.push(
+        "Account could not be evaluated after retries.",
+        "Marking as UNKNOWN and continuing.",
+      );
+    }
+  }
+  return lines.join("\n");
 }
 
 export function formatRecentBatchDiagnosticWarning(error: unknown): string {
@@ -128,7 +143,7 @@ export function formatRecentBatchDiagnosticWarning(error: unknown): string {
   return (
     "Warning: Could not write recent batch diagnostic" +
     detail +
-    ". The original audit error is unchanged."
+    ". Diagnostic logging does not change audit handling."
   );
 }
 

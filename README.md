@@ -167,7 +167,7 @@ La consulta se completó correctamente y GitHub no mostró contribuciones durant
 
 ### `UNKNOWN`
 
-La cuenta no pudo evaluarse por un error GraphQL asociado a ella, una respuesta incompleta o datos imposibles de interpretar. Un error individual no detiene el análisis de las demás cuentas.
+La cuenta no pudo evaluarse por un error GraphQL asociado a ella, una respuesta incompleta, datos imposibles de interpretar o un HTTP 502/504 que agotó retries incluso al consultar ese singleton. Es un fallo técnico: no implica inactividad, privacidad ni que esa cuenta haya causado el error. Un error individual recuperable no detiene el análisis de las demás cuentas.
 
 ### `INSUFFICIENT_VISIBILITY`
 
@@ -255,9 +255,11 @@ El análisis reciente agrupa hasta 25 usuarios por request GraphQL mediante alia
 25 = production default
 ```
 
-Este tamaño se eligió empíricamente. No es un máximo garantizado por GitHub: pruebas internas con esta query observaron resource limits en tamaños mayores. Si GitHub rechaza un batch por límites de recursos o complejidad, la CLI conserva los aliases utilizables y divide únicamente los fallidos en mitades hasta resolverlos. Por ejemplo, 25 se divide en 12 + 13. Un fallo individual definitivo produce `UNKNOWN`.
+Este tamaño se eligió empíricamente. No es un máximo garantizado por GitHub: pruebas internas con esta query observaron resource limits en tamaños mayores. Si GitHub rechaza aliases concretos con `RESOURCE_LIMIT`, la CLI conserva los aliases utilizables y divide únicamente los fallidos en mitades hasta resolverlos. Por ejemplo, 25 se divide en 12 + 13.
 
-Los errores de autenticación, token inválido, rate limit global, HTTP global o schema no activan esa división. La CLI aborta con código distinto de cero.
+Un batch que agota los tres intentos con HTTP 502 o 504 también se divide secuencialmente por mitades. La reducción afecta sólo a ese grupo y puede repetirse dentro de la rama; el siguiente batch normal vuelve a ser de 25. Un singleton que vuelve a agotar 502/504 termina como `UNKNOWN`, se guarda como completado y no pasa al lookup histórico.
+
+HTTP 503 no activa esta reducción y sigue siendo fatal. Tampoco la activan autenticación, 401, 403, 429, rate limits, errores de transporte agotados, parsing, schema u otros HTTP.
 
 Para 5.000 usuarios elegibles, el barrido reciente requiere aproximadamente 200 requests si todos los batches de 25 funcionan. Es una estimación, no una garantía: fallbacks, cambios de GitHub y errores parciales pueden aumentar el número.
 
@@ -269,7 +271,7 @@ Durante una auditoría se guarda:
 .ghost-following/checkpoints/<username>.json
 ```
 
-La escritura captura un snapshot consistente, lo guarda en un temporal único y realiza rename para no reemplazar el último checkpoint válido con contenido parcial. Los commits para un mismo checkpoint se serializan: una versión anterior nunca puede terminar después y reemplazar progreso más nuevo. Se persiste después de cada batch reciente resuelto y después de cada cuenta cuyo lookup histórico termina. Una auditoría completa elimina su checkpoint después de producir el reporte y los exports solicitados.
+La escritura captura un snapshot consistente, lo guarda en un temporal único y realiza rename para no reemplazar el último checkpoint válido con contenido parcial. Los commits para un mismo checkpoint se serializan: una versión anterior nunca puede terminar después y reemplazar progreso más nuevo. Se persiste después de cada subconjunto reciente resuelto, incluso una rama de fallback o un singleton `UNKNOWN`, y después de cada cuenta cuyo lookup histórico termina. Así, si una rama posterior falla, `--resume` no vuelve a consultar los aliases ya guardados. Una auditoría completa elimina su checkpoint después de producir el reporte y los exports solicitados.
 
 Una ejecución normal comienza fresca y sobrescribe un checkpoint anterior. Para continuar explícitamente:
 
@@ -286,17 +288,19 @@ El following se consulta nuevamente. Si cambió, la CLI informa las cantidades a
 
 El barrido reciente muestra hitos de progreso sin imprimir una línea por usuario. Un error asociado a una cuenta produce `UNKNOWN` y permite continuar. Un error asociado sólo a la búsqueda histórica conserva `NO_RECENT_VISIBLE_ACTIVITY`, pero deja la fecha desconocida.
 
-Cada request REST o GraphQL que recibe HTTP 502, 503 o 504 se reintenta hasta un máximo de tres intentos totales, con esperas deterministas de 1 y 2 segundos. Un `Retry-After` numérico en esos mismos estados puede reemplazar la espera, limitado internamente a 5 segundos. También se reintentan sólo códigos de transporte explícitamente clasificados como temporales; otros errores de `fetch`, parsing o schema siguen siendo fatales sin retry. Los retries son silenciosos y conservan exactamente la misma página REST o query/variables GraphQL.
+Cada request REST o GraphQL que recibe HTTP 502, 503 o 504 se reintenta hasta un máximo de tres intentos totales, con esperas deterministas de 1 y 2 segundos. Un `Retry-After` numérico en esos mismos estados puede reemplazar la espera, limitado internamente a 5 segundos. También se reintentan sólo códigos de transporte explícitamente clasificados como temporales; otros errores de `fetch` siguen siendo fatales sin retry. Los retries son silenciosos y conservan exactamente la misma página REST o query/variables GraphQL.
 
-Esta política no se aplica a 401, 403 ni 429. Tampoco reemplaza el fallback binario exclusivo de los resource limits GraphQL.
+Para GraphQL, esos tres intentos forman un único presupuesto compartido entre HTTP transitorio, transporte, fallos clasificados durante la lectura del body y JSON sintácticamente inválido. Cada intento reutiliza exactamente la misma query, variables y body serializado, tanto en recent como en historical. Un JSON válido que no cumple el schema esperado sigue siendo fatal sin retry. Si el JSON inválido agota los tres intentos, el audit termina con error y puede continuarse mediante `--resume`; nunca se guarda ni imprime el body recibido.
 
-Si un batch reciente agota los tres intentos con HTTP 502, 503 o 504, la auditoría sigue terminando con error y muestra los logins exactos del request fallido. Además agrega una línea JSON independiente en:
+Esta política no se aplica a 401, 403 ni 429. Tampoco reemplaza el fallback binario de los resource limits GraphQL; ambos mecanismos pueden componerse dentro del mismo árbol sin volver a consultar aliases ya resueltos.
+
+Si un batch reciente agota los tres intentos con HTTP 502 o 504, muestra los logins exactos y reduce sólo ese batch. HTTP 503 sigue terminando la auditoría con error sin dividir. Cada request exacto que agota 502, 503 o 504 agrega una línea JSON independiente, incluso para una rama anidada o un singleton recuperado, en:
 
 ```text
 .ghost-following/diagnostics/<audit-username>-failures.jsonl
 ```
 
-El incidente contiene únicamente timestamp, usuario auditado, período recent, status HTTP, intentos y logins del batch. No contiene token, headers, request GraphQL, calendarios ni responses. El archivo es local, acumulativo y está cubierto por el ignore de `.ghost-following/`. Si no puede escribirse, la CLI muestra una advertencia pero preserva como error principal el HTTP original.
+El incidente contiene únicamente timestamp, usuario auditado, período recent, status HTTP, intentos y logins del batch. No contiene token, headers, request GraphQL, calendarios ni responses. El archivo es local, acumulativo y está cubierto por el ignore de `.ghost-following/`. Si no puede escribirse, la CLI muestra una advertencia sin cambiar el comportamiento de recuperación o error del audit.
 
 La búsqueda histórica se ejecuta únicamente para candidatos sin actividad reciente cuyo `hasActivityInThePast` sea verdadero. Las ventanas de una misma cuenta se consultan secuencialmente para poder detenerse en el primer resultado; distintas cuentas sí comparten el pool de cuatro workers. Se generan como máximo 5 queries adicionales por candidato y ninguna cuando la señal de actividad pasada es falsa. Con 30 candidatos, el peor caso teórico es de unas 150 queries históricas adicionales.
 
@@ -305,6 +309,21 @@ El coste GraphQL no se presupone; se muestra el último coste observado que GitH
 La misma query devuelve `cost`, `limit`, `remaining` y `resetAt`; no se realiza una request adicional para consultar la cuota.
 
 GitHub aplica rate limits independientes a REST y GraphQL. El batching reduce drásticamente las requests recientes, pero el lookup histórico sigue siendo individual y puede consumir una parte importante de la cuota. Cuando GraphQL informa cuota cero, la CLI guarda el progreso, muestra `resetAt`, termina con código no-cero y ofrece el comando `--resume`. No espera automáticamente hasta el reset.
+
+## Troubleshooting de un batch recent
+
+La herramienta `diagnose:recent-batch` es exclusivamente para investigar el último batch recent que agotó retries durante un audit:
+
+```bash
+npm run diagnose:recent-batch -- PratikDhanave
+npm run diagnose:recent-batch -- --help
+```
+
+Lee el último incidente válido de `.ghost-following/diagnostics/<audit-username>-failures.jsonl` y reproduce exactamente sus logins y período con la query recent, cliente GraphQL y retries productivos. No vuelve a consultar el following por REST y no ejecuta historical, exports, checkpoints ni el lifecycle normal del audit.
+
+La investigación siempre prueba primero el batch completo. Sólo un HTTP 502 o 504 agotado lo divide secuencialmente por mitades; un HTTP 503 detiene la investigación como inconclusa. Los `RESOURCE_LIMIT` GraphQL conservan una razón de split separada. Los resultados se guardan como JSON en `.ghost-following/diagnostics/investigations/` sin modificar el JSONL fuente.
+
+Este comando puede consumir cuota GraphQL y está pensado para troubleshooting puntual, no para uso rutinario. Un timeout repetido con un singleton es evidencia para revisión manual: no demuestra que esa cuenta causó el timeout y no identifica perfiles privados.
 
 ## Desarrollo
 
