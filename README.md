@@ -339,6 +339,19 @@ La investigación siempre prueba primero el batch completo. Sólo un HTTP 502 o 
 
 Este comando puede consumir cuota GraphQL y está pensado para troubleshooting puntual, no para uso rutinario. Un timeout repetido con un singleton es evidencia para revisión manual: no demuestra que esa cuenta causó el timeout y no identifica perfiles privados.
 
+### Recent query comparison diagnostic
+
+Este experimento de desarrollo compara la query recent productiva (`CURRENT`) con proyecciones `CLASSIFIER_MINIMAL` y `NUMERIC_MINIMAL`, usando los mismos logins, período, retries y shapes fijos del incidente:
+
+```bash
+npm run diagnose:recent-query -- PratikDhanave
+npm run diagnose:recent-query -- PratikDhanave --timestamp 2026-08-25T01:40:41.234Z
+npm run diagnose:recent-query -- PratikDhanave --source archive/pratik/PratikDhanave-failures.jsonl --runs 3
+npm run diagnose:recent-query -- --help
+```
+
+`--timestamp` selecciona exactamente un incidente, `--source` permite leer un JSONL archivado y `--runs` acepta de 1 a 3 repeticiones (default 1). El comando consume GraphQL real cuando se ejecuta, pero no hace REST, historical, audit, checkpoints ni exports; tampoco modifica la clasificación productiva o el failure JSONL. Ejecuta todo secuencialmente, no aplica adaptive split oculto y guarda un JSON seguro bajo `.ghost-following/diagnostics/query-comparisons/`.
+
 ## Desarrollo
 
 ```bash
