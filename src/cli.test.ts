@@ -3,17 +3,23 @@ import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { HELP } from "./args.js";
+import { HELP, parseArgs } from "./args.js";
 import {
   checkpointHistoricalResults,
   checkpointPathFor,
   checkpointRecentResults,
   createCheckpoint,
   loadCheckpoint,
+  recordHistoricalResult,
   recordRecentResults,
   writeCheckpointAtomic,
 } from "./checkpoint.js";
-import { runCli, TOKEN_REQUIRED_MESSAGE, type CliIO } from "./cli.js";
+import {
+  formatSuggestedResumeCommand,
+  runCli,
+  TOKEN_REQUIRED_MESSAGE,
+  type CliIO,
+} from "./cli.js";
 import type { FollowedAccount } from "./domain/account.js";
 import {
   createActivityPeriod,
@@ -29,6 +35,216 @@ function emptyFollowingFetch(): typeof fetch {
         "x-ratelimit-remaining": "4999",
       },
     })) as typeof fetch;
+}
+
+const activeFollowedAccount: FollowedAccount = {
+  login: "active-user",
+  id: 1,
+  type: "User",
+  htmlUrl: "https://github.com/active-user",
+};
+
+function activeResult(period: ReturnType<typeof createActivityPeriod>): AccountActivityResult {
+  return {
+    account: activeFollowedAccount,
+    status: "ACTIVE",
+    activity: {
+      login: activeFollowedAccount.login,
+      periodStart: period.from,
+      periodEnd: period.to,
+      totalContributions: 1,
+      totalCommitContributions: 1,
+      totalIssueContributions: 0,
+      totalPullRequestContributions: 0,
+      totalPullRequestReviewContributions: 0,
+      restrictedContributionsCount: 0,
+      hasAnyContributions: true,
+      hasAnyRestrictedContributions: false,
+      hasActivityInThePast: false,
+    },
+  };
+}
+
+function activeFollowingFetch(counter: { graphql: number }): typeof fetch {
+  return (async (input: string | URL | Request) => {
+    if (String(input).includes("/following")) {
+      return new Response(
+        JSON.stringify([
+          {
+            login: activeFollowedAccount.login,
+            id: activeFollowedAccount.id,
+            type: activeFollowedAccount.type,
+            html_url: activeFollowedAccount.htmlUrl,
+          },
+        ]),
+        {
+          status: 200,
+          headers: {
+            "x-ratelimit-limit": "5000",
+            "x-ratelimit-remaining": "4999",
+          },
+        },
+      );
+    }
+    counter.graphql += 1;
+    return new Response(
+      JSON.stringify({
+        data: {
+          u0: {
+            login: activeFollowedAccount.login,
+            contributionsCollection: {
+              startedAt: "2025-08-24T00:00:00.000Z",
+              endedAt: "2026-08-24T00:00:00.000Z",
+              hasAnyContributions: true,
+              hasAnyRestrictedContributions: false,
+              hasActivityInThePast: false,
+              restrictedContributionsCount: 0,
+              totalCommitContributions: 1,
+              totalIssueContributions: 0,
+              totalPullRequestContributions: 0,
+              totalPullRequestReviewContributions: 0,
+              contributionCalendar: { totalContributions: 1 },
+            },
+          },
+          rateLimit: {
+            cost: 1,
+            limit: 5000,
+            remaining: 4998,
+            resetAt: "2026-08-24T01:00:00.000Z",
+          },
+        },
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+}
+
+function quietAccounts(count: number): FollowedAccount[] {
+  return Array.from({ length: count }, (_, index) => ({
+    login: `quiet-${index}`,
+    id: index + 1,
+    type: "User",
+    htmlUrl: `https://github.com/quiet-${index}`,
+  }));
+}
+
+function quietResult(
+  account: FollowedAccount,
+  period: ReturnType<typeof createActivityPeriod>,
+): AccountActivityResult {
+  return {
+    account,
+    status: "NO_RECENT_VISIBLE_ACTIVITY",
+    activity: {
+      login: account.login,
+      periodStart: period.from,
+      periodEnd: period.to,
+      totalContributions: 0,
+      totalCommitContributions: 0,
+      totalIssueContributions: 0,
+      totalPullRequestContributions: 0,
+      totalPullRequestReviewContributions: 0,
+      restrictedContributionsCount: 0,
+      hasAnyContributions: false,
+      hasAnyRestrictedContributions: false,
+      hasActivityInThePast: false,
+    },
+  };
+}
+
+function quietFollowingFetch(
+  accounts: readonly FollowedAccount[],
+  calls: { recent: number; historical: number },
+): typeof fetch {
+  return (async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    if (String(input).includes("/following")) {
+      return new Response(
+        JSON.stringify(
+          accounts.map(({ login, id, type, htmlUrl }) => ({
+            login,
+            id,
+            type,
+            html_url: htmlUrl,
+          })),
+        ),
+        {
+          status: 200,
+          headers: {
+            "x-ratelimit-limit": "5000",
+            "x-ratelimit-remaining": "4999",
+          },
+        },
+      );
+    }
+
+    const body = JSON.parse(String(init?.body)) as {
+      query: string;
+      variables: Record<string, string>;
+    };
+    if (body.query.includes("HistoricalActivity")) {
+      calls.historical += 1;
+      return new Response(
+        JSON.stringify({
+          data: {
+            user: {
+              login: body.variables.login,
+              contributionsCollection: {
+                startedAt: body.variables.from,
+                endedAt: body.variables.to,
+                hasAnyContributions: false,
+                hasAnyRestrictedContributions: false,
+                restrictedContributionsCount: 0,
+                latestRestrictedContributionDate: null,
+                contributionCalendar: { totalContributions: 0, weeks: [] },
+              },
+            },
+            rateLimit: {
+              cost: 1,
+              limit: 5000,
+              remaining: 4900,
+              resetAt: "2026-08-24T01:00:00.000Z",
+            },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+
+    calls.recent += 1;
+    const data: Record<string, unknown> = {
+      rateLimit: {
+        cost: 1,
+        limit: 5000,
+        remaining: 4998,
+        resetAt: "2026-08-24T01:00:00.000Z",
+      },
+    };
+    const logins = Object.entries(body.variables)
+      .filter(([key]) => key.startsWith("login"))
+      .map(([, login]) => login);
+    for (const [index, login] of logins.entries()) {
+      data[`u${index}`] = {
+        login,
+        contributionsCollection: {
+          startedAt: body.variables.from,
+          endedAt: body.variables.to,
+          hasAnyContributions: false,
+          hasAnyRestrictedContributions: false,
+          hasActivityInThePast: false,
+          restrictedContributionsCount: 0,
+          totalCommitContributions: 0,
+          totalIssueContributions: 0,
+          totalPullRequestContributions: 0,
+          totalPullRequestReviewContributions: 0,
+          contributionCalendar: { totalContributions: 0 },
+        },
+      };
+    }
+    return new Response(JSON.stringify({ data }), { status: 200 });
+  }) as typeof fetch;
 }
 
 it("requires GITHUB_TOKEN before activity analysis without making a request", async () => {
@@ -53,6 +269,43 @@ it("requires GITHUB_TOKEN before activity analysis without making a request", as
 });
 
 describe("CLI options", () => {
+  it("builds deterministic and parseable resume commands", () => {
+    const cases = [
+      {
+        days: 180,
+        historyYears: 3,
+        expected:
+          "npm run start -- user --days 180 --history-years 3 --resume",
+      },
+      {
+        days: 365,
+        historyYears: 0,
+        expected: "npm run start -- user --days 365 --resume",
+      },
+      {
+        days: 365,
+        historyYears: 1,
+        expected:
+          "npm run start -- user --days 365 --history-years 1 --resume",
+      },
+    ];
+
+    for (const { days, historyYears, expected } of cases) {
+      const command = formatSuggestedResumeCommand(
+        "user",
+        days,
+        historyYears,
+      );
+      assert.equal(command, expected);
+      const parsed = parseArgs(command.split(" ").slice(4));
+      assert.equal(parsed.help, false);
+      if (parsed.help) continue;
+      assert.equal(parsed.days, days);
+      assert.equal(parsed.historyYears ?? 0, historyYears);
+      assert.equal(parsed.resume, true);
+    }
+  });
+
   it("shows help without a username, token or request", async () => {
     const logs: string[] = [];
     let fetchCalled = false;
@@ -81,6 +334,11 @@ describe("CLI options", () => {
       ["octocat", "--json"],
       ["octocat", "--csv"],
       ["octocat", "--days", "0"],
+      ["octocat", "--history-years", "0"],
+      ["octocat", "--history-years", "6"],
+      ["octocat", "--history-years", "1.5"],
+      ["octocat", "--history-years", "foo"],
+      ["octocat", "--history-years"],
     ]) {
       const errors: string[] = [];
       const exitCode = await runCli(args, {
@@ -119,6 +377,7 @@ describe("CLI options", () => {
 
       assert.equal(exitCode, 0);
       assert.match(logs[0] ?? "", /Period: last 180 days/);
+      assert.match(logs[0] ?? "", /Historical lookup: disabled/);
       assert.match(logs[1] ?? "", /Exports\n-------/);
       assert.match(logs[1] ?? "", /JSON:/);
       assert.match(logs[1] ?? "", /CSV:/);
@@ -126,10 +385,12 @@ describe("CLI options", () => {
       const json = JSON.parse(await readFile(jsonPath, "utf8")) as {
         schemaVersion: number;
         period: { days: number };
+        history: { years: number };
         accounts: unknown[];
       };
       assert.equal(json.schemaVersion, 1);
       assert.equal(json.period.days, 180);
+      assert.equal(json.history.years, 0);
       assert.deepEqual(json.accounts, []);
       assert.match(await readFile(csvPath, "utf8"), /^login,profile_url/);
     } finally {
@@ -181,6 +442,276 @@ describe("CLI options", () => {
 
       assert.equal(exitCode, 0);
       await assert.rejects(access(path));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports fresh historical progress from the callback actual total", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ghost-following-fresh-progress-"));
+    const accounts = quietAccounts(11);
+    const calls = { recent: 0, historical: 0 };
+    const logs: string[] = [];
+
+    try {
+      assert.equal(
+        await runCli(["owner", "--history-years", "1"], {
+          token: "test-placeholder",
+          fetch: quietFollowingFetch(accounts, calls),
+          checkpointRoot: join(root, "checkpoints"),
+          now: new Date("2026-08-24T00:00:00.000Z"),
+          io: { log: (message) => logs.push(message), error() {} },
+        }),
+        0,
+      );
+      assert.equal(calls.recent, 1);
+      assert.equal(calls.historical, 11);
+      assert.deepEqual(
+        logs.filter((message) =>
+          message.startsWith("Analyzing historical activity:"),
+        ),
+        [
+          "Analyzing historical activity: 10 / 11",
+          "Analyzing historical activity: 11 / 11",
+        ],
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not report or request historical work when history is disabled", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ghost-following-no-history-progress-"));
+    const calls = { recent: 0, historical: 0 };
+    const logs: string[] = [];
+
+    try {
+      assert.equal(
+        await runCli(["owner"], {
+          token: "test-placeholder",
+          fetch: quietFollowingFetch(quietAccounts(11), calls),
+          checkpointRoot: join(root, "checkpoints"),
+          now: new Date("2026-08-24T00:00:00.000Z"),
+          io: { log: (message) => logs.push(message), error() {} },
+        }),
+        0,
+      );
+      assert.equal(calls.recent, 1);
+      assert.equal(calls.historical, 0);
+      assert.equal(
+        logs.some((message) =>
+          message.startsWith("Analyzing historical activity:"),
+        ),
+        false,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports resume historical progress once with reused completion included", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ghost-following-resume-progress-"));
+    const checkpointRoot = join(root, "checkpoints");
+    const path = checkpointPathFor("owner", checkpointRoot);
+    const now = new Date("2026-08-24T00:00:00.000Z");
+    const period = createActivityPeriod(now);
+    const accounts = quietAccounts(3);
+    const recent = accounts.map((account) => quietResult(account, period));
+    const checkpoint = createCheckpoint("owner", period, accounts, now, 1);
+    recordRecentResults(checkpoint, recent);
+    recordHistoricalResult(checkpoint, {
+      ...recent[0]!,
+      lastVisibleActivityAt: null,
+      historicalLookupStatus: "NOT_FOUND_IN_LOOKBACK",
+    });
+    await writeCheckpointAtomic(path, checkpoint, now);
+    const calls = { recent: 0, historical: 0 };
+    const logs: string[] = [];
+
+    try {
+      assert.equal(
+        await runCli(["owner", "--resume"], {
+          token: "test-placeholder",
+          fetch: quietFollowingFetch(accounts, calls),
+          checkpointRoot,
+          now,
+          io: { log: (message) => logs.push(message), error() {} },
+        }),
+        0,
+      );
+      assert.equal(calls.recent, 0);
+      assert.equal(calls.historical, 2);
+      assert.deepEqual(
+        logs.filter((message) =>
+          message.startsWith("Analyzing historical activity:"),
+        ),
+        ["Analyzing historical activity: 3 / 3"],
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fresh audits ignore existing checkpoint history and completed results", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ghost-following-fresh-history-"));
+    const checkpointRoot = join(root, "checkpoints");
+    const path = checkpointPathFor("octocat", checkpointRoot);
+    const now = new Date("2026-08-24T00:00:00.000Z");
+    const period = createActivityPeriod(now);
+    const counter = { graphql: 0 };
+
+    try {
+      const oldFiveYearAudit = createCheckpoint(
+        "octocat",
+        period,
+        [activeFollowedAccount],
+        now,
+        5,
+      );
+      recordRecentResults(oldFiveYearAudit, [activeResult(period)]);
+      await writeCheckpointAtomic(path, oldFiveYearAudit, now);
+      const defaultJson = join(root, "default.json");
+      assert.equal(
+        await runCli(["octocat", "--json", defaultJson], {
+          token: "test-placeholder",
+          fetch: activeFollowingFetch(counter),
+          checkpointRoot,
+          now,
+          io: { log() {}, error() {} },
+        }),
+        0,
+      );
+      assert.equal(counter.graphql, 1);
+      assert.equal(
+        (JSON.parse(await readFile(defaultJson, "utf8")) as {
+          history: { years: number };
+        }).history.years,
+        0,
+      );
+
+      const oldDisabledAudit = createCheckpoint(
+        "octocat",
+        period,
+        [activeFollowedAccount],
+        now,
+        0,
+      );
+      recordRecentResults(oldDisabledAudit, [activeResult(period)]);
+      await writeCheckpointAtomic(path, oldDisabledAudit, now);
+      counter.graphql = 0;
+      const threeYearJson = join(root, "three-years.json");
+      assert.equal(
+        await runCli(
+          ["octocat", "--history-years", "3", "--json", threeYearJson],
+          {
+            token: "test-placeholder",
+            fetch: activeFollowingFetch(counter),
+            checkpointRoot,
+            now,
+            io: { log() {}, error() {} },
+          },
+        ),
+        0,
+      );
+      assert.equal(counter.graphql, 1);
+      assert.equal(
+        (JSON.parse(await readFile(threeYearJson, "utf8")) as {
+          history: { years: number };
+        }).history.years,
+        3,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resume inherits saved history, accepts a match and rejects a mismatch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ghost-following-resume-history-"));
+    const checkpointRoot = join(root, "checkpoints");
+    const path = checkpointPathFor("octocat", checkpointRoot);
+    const now = new Date("2026-08-24T00:00:00.000Z");
+    const period = createActivityPeriod(now);
+
+    try {
+      await writeCheckpointAtomic(
+        path,
+        createCheckpoint("octocat", period, [], now, 3),
+        now,
+      );
+      const inheritedJson = join(root, "inherited.json");
+      assert.equal(
+        await runCli(["octocat", "--resume", "--json", inheritedJson], {
+          token: "test-placeholder",
+          fetch: emptyFollowingFetch(),
+          checkpointRoot,
+          now,
+          io: { log() {}, error() {} },
+        }),
+        0,
+      );
+      assert.equal(
+        (JSON.parse(await readFile(inheritedJson, "utf8")) as {
+          history: { years: number };
+        }).history.years,
+        3,
+      );
+
+      await writeCheckpointAtomic(
+        path,
+        createCheckpoint("octocat", period, [], now, 0),
+        now,
+      );
+      const disabledJson = join(root, "disabled.json");
+      assert.equal(
+        await runCli(["octocat", "--resume", "--json", disabledJson], {
+          token: "test-placeholder",
+          fetch: emptyFollowingFetch(),
+          checkpointRoot,
+          now,
+          io: { log() {}, error() {} },
+        }),
+        0,
+      );
+      assert.equal(
+        (JSON.parse(await readFile(disabledJson, "utf8")) as {
+          history: { years: number };
+        }).history.years,
+        0,
+      );
+
+      await writeCheckpointAtomic(
+        path,
+        createCheckpoint("octocat", period, [], now, 3),
+        now,
+      );
+      assert.equal(
+        await runCli(["octocat", "--resume", "--history-years", "3"], {
+          token: "test-placeholder",
+          fetch: emptyFollowingFetch(),
+          checkpointRoot,
+          now,
+          io: { log() {}, error() {} },
+        }),
+        0,
+      );
+
+      await writeCheckpointAtomic(
+        path,
+        createCheckpoint("octocat", period, [], now, 3),
+        now,
+      );
+      const errors: string[] = [];
+      assert.equal(
+        await runCli(["octocat", "--resume", "--history-years", "1"], {
+          token: "test-placeholder",
+          fetch: emptyFollowingFetch(),
+          checkpointRoot,
+          now,
+          io: { log() {}, error: (message) => errors.push(message) },
+        }),
+        1,
+      );
+      assert.match(errors[0] ?? "", /does not match requested --history-years 1/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -247,7 +778,9 @@ describe("CLI options", () => {
     const errors: string[] = [];
 
     try {
-      const exitCode = await runCli(["octocat"], {
+      const exitCode = await runCli(
+        ["octocat", "--days", "180", "--history-years", "3"],
+        {
         token: "obvious-test-placeholder",
         fetch: fetchMock,
         checkpointRoot: root,
@@ -256,7 +789,8 @@ describe("CLI options", () => {
           log: (message) => logs.push(message),
           error: (message) => errors.push(message),
         },
-      });
+        },
+      );
 
       assert.equal(exitCode, 1);
       assert.equal(graphQLRequests, 1);
@@ -264,7 +798,10 @@ describe("CLI options", () => {
       assert.match(errors[0] ?? "", /GitHub GraphQL rate limit exhausted/);
       assert.match(errors[0] ?? "", /Progress saved/);
       assert.match(errors[0] ?? "", new RegExp(resetAt));
-      assert.match(errors[0] ?? "", /npm run start -- octocat --resume/);
+      assert.match(
+        errors[0] ?? "",
+        /npm run start -- octocat --days 180 --history-years 3 --resume/,
+      );
       const saved = JSON.parse(await readFile(path, "utf8")) as {
         completedRecentActivity: Record<string, unknown>;
       };
@@ -314,6 +851,7 @@ describe("CLI options", () => {
       },
     }));
     const checkpoint = createCheckpoint("octocat", period, accounts, now);
+    delete (checkpoint as Partial<typeof checkpoint>).historyYears;
     recordRecentResults(checkpoint, recent);
     for (const item of recent) {
       (checkpoint.completedHistoricalActivity as Record<string, unknown>)[

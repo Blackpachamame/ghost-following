@@ -54,6 +54,9 @@ export interface AuditResult {
     from: string;
     to: string;
   };
+  history: {
+    years: number;
+  };
   summary: AuditSummary;
   accounts: AccountAuditResult[];
   rateLimits: {
@@ -91,6 +94,9 @@ export function createAuditResult(input: {
       days: analysis.period.days,
       from: analysis.period.from,
       to: analysis.period.to,
+    },
+    history: {
+      years: analysis.historyYears,
     },
     summary: {
       followingTotal: analysis.followingTotal,

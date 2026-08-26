@@ -11,6 +11,7 @@ it("creates a reusable audit result with stable summary and coherent nulls", () 
   };
   const analysis: ActivityAnalysis = {
     period,
+    historyYears: 0,
     followingTotal: 3,
     eligibleUsers: 2,
     unsupportedAccounts: 1,
@@ -73,6 +74,7 @@ it("creates a reusable audit result with stable summary and coherent nulls", () 
   assert.equal(audit.schemaVersion, 1);
   assert.equal(audit.generatedAt, "2026-08-22T00:00:00.000Z");
   assert.equal(audit.period.days, 180);
+  assert.deepEqual(audit.history, { years: 0 });
   assert.deepEqual(audit.summary, {
     followingTotal: 3,
     eligibleUsers: 2,

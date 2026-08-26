@@ -14,6 +14,7 @@ export const CSV_HEADERS = [
   "has_activity_in_past",
   "last_visible_activity",
   "historical_lookup_status",
+  "history_years",
 ] as const;
 
 export function escapeCsvValue(
@@ -41,6 +42,7 @@ export function serializeAuditCsv(audit: AuditResult): string {
       account.hasActivityInThePast,
       account.lastVisibleActivityAt,
       account.historicalLookupStatus,
+      audit.history.years,
     ]),
   ];
 

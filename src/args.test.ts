@@ -12,6 +12,39 @@ describe("parseArgs", () => {
     });
   });
 
+  it("keeps historical lookup disabled unless explicitly requested", () => {
+    const parsed = parseArgs(["Blackpachamame"]);
+    assert.equal(parsed.help, false);
+    if (!parsed.help) assert.equal(parsed.historyYears, undefined);
+  });
+
+  it("accepts every history year value from 1 through 5", () => {
+    for (const historyYears of [1, 2, 3, 4, 5]) {
+      const parsed = parseArgs([
+        "octocat",
+        "--history-years",
+        String(historyYears),
+      ]);
+      assert.equal(parsed.help, false);
+      if (!parsed.help) assert.equal(parsed.historyYears, historyYears);
+    }
+    assert.match(HELP, /--history-years <1-5>/);
+    assert.match(HELP, /default: disabled/);
+  });
+
+  it("rejects every invalid history year value", () => {
+    for (const value of ["0", "6", "-1", "1.5", "foo"]) {
+      assert.throws(
+        () => parseArgs(["octocat", "--history-years", value]),
+        /Invalid value for --history-years/,
+      );
+    }
+    assert.throws(
+      () => parseArgs(["octocat", "--history-years"]),
+      /Missing value for --history-years/,
+    );
+  });
+
   it("accepts a custom positive integer period", () => {
     assert.deepEqual(parseArgs(["octocat", "--days", "180"]), {
       help: false,

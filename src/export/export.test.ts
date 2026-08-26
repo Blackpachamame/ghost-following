@@ -18,6 +18,7 @@ function auditFixture(): AuditResult {
       from: "2026-02-23T00:00:00.000Z",
       to: "2026-08-22T00:00:00.000Z",
     },
+    history: { years: 5 },
     summary: {
       followingTotal: 2,
       eligibleUsers: 1,
@@ -64,6 +65,7 @@ describe("JSON export", () => {
     const parsed = JSON.parse(output) as AuditResult;
 
     assert.equal(parsed.schemaVersion, 1);
+    assert.equal(parsed.history.years, 5);
     assert.equal(parsed.summary.coverage, 100);
     assert.equal(parsed.accounts.length, 1);
     assert.equal(parsed.accounts[0]?.hasActivityInThePast, false);
@@ -71,6 +73,19 @@ describe("JSON export", () => {
     assert.equal(parsed.accounts[0]?.historicalLookupStatus, "FOUND");
     assert.doesNotMatch(output, /GITHUB_TOKEN|obvious-secret-value/);
   });
+
+  it("keeps NOT_REQUESTED distinct from an executed empty lookback", () => {
+    const audit = auditFixture();
+    audit.history.years = 0;
+    audit.accounts[0]!.lastVisibleActivityAt = null;
+    audit.accounts[0]!.historicalLookupStatus = "NOT_REQUESTED";
+    const parsed = JSON.parse(serializeAuditJson(audit)) as AuditResult;
+
+    assert.equal(parsed.history.years, 0);
+    assert.equal(parsed.accounts[0]?.lastVisibleActivityAt, null);
+    assert.equal(parsed.accounts[0]?.historicalLookupStatus, "NOT_REQUESTED");
+  });
+
 });
 
 describe("CSV export", () => {
@@ -79,6 +94,32 @@ describe("CSV export", () => {
     assert.equal(output.split("\n")[0], CSV_HEADERS.join(","));
     assert.match(output, /^login,profile_url,status,period_days,/);
     assert.equal(output.match(/NO_RECENT_VISIBLE_ACTIVITY/g)?.length, 1);
+    assert.deepEqual(CSV_HEADERS.slice(0, -1), [
+      "login",
+      "profile_url",
+      "status",
+      "period_days",
+      "total_contributions",
+      "commits",
+      "pull_requests",
+      "reviews",
+      "issues",
+      "restricted_contributions",
+      "has_activity_in_past",
+      "last_visible_activity",
+      "historical_lookup_status",
+    ]);
+    assert.equal(CSV_HEADERS.at(-1), "history_years");
+    assert.match(output, /,FOUND,5\n$/);
+  });
+
+  it("exports disabled history configuration and NOT_REQUESTED", () => {
+    const audit = auditFixture();
+    audit.history.years = 0;
+    audit.accounts[0]!.lastVisibleActivityAt = null;
+    audit.accounts[0]!.historicalLookupStatus = "NOT_REQUESTED";
+
+    assert.match(serializeAuditCsv(audit), /false,,NOT_REQUESTED,0\n$/);
   });
 
   it("escapes commas, quotes and newlines and renders null as empty", () => {
@@ -90,7 +131,7 @@ describe("CSV export", () => {
     const output = serializeAuditCsv(auditFixture());
     assert.match(output, /"comma,name"/);
     assert.match(output, /"https:\/\/example\.test\/""quoted""\nnext"/);
-    assert.match(output, /false,2025-08-17,FOUND/);
+    assert.match(output, /false,2025-08-17,FOUND,5/);
     assert.doesNotMatch(output, /NO_PAST_ACTIVITY/);
   });
 });

@@ -1,4 +1,7 @@
-import { ACTIVITY_PERIOD_DAYS } from "./domain/activity.js";
+import {
+  ACTIVITY_PERIOD_DAYS,
+  MAX_HISTORICAL_LOOKBACK_YEARS,
+} from "./domain/activity.js";
 
 const USERNAME_PATTERN = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i;
 
@@ -11,7 +14,8 @@ export const HELP = [
   "  github-ghost-following <username> [options]",
   "",
   "Options:",
-  "  --days <number>     Activity period in days (default: 365)",
+  "  --days <number>       Activity period in days (default: 365)",
+  "  --history-years <1-5> Look back up to N years for quiet accounts (default: disabled)",
   "  --json <path>       Export full audit as JSON",
   "  --csv <path>        Export account audit as CSV",
   "  --resume            Resume a compatible saved audit",
@@ -28,6 +32,7 @@ export interface AuditCliOptions {
   help: false;
   username: string;
   days: number;
+  historyYears?: number;
   resume: boolean;
   jsonPath?: string;
   csvPath?: string;
@@ -67,6 +72,25 @@ function parseDays(value: string): number {
   return days;
 }
 
+function parseHistoryYears(value: string): number {
+  if (!/^\d+$/.test(value)) {
+    throw new UsageError(
+      `Invalid value for --history-years: expected an integer from 1 to ${MAX_HISTORICAL_LOOKBACK_YEARS}.`,
+    );
+  }
+  const years = Number(value);
+  if (
+    !Number.isSafeInteger(years) ||
+    years < 1 ||
+    years > MAX_HISTORICAL_LOOKBACK_YEARS
+  ) {
+    throw new UsageError(
+      `Invalid value for --history-years: expected an integer from 1 to ${MAX_HISTORICAL_LOOKBACK_YEARS}.`,
+    );
+  }
+  return years;
+}
+
 function validateUsername(username: string | undefined): string {
   if (
     username === undefined ||
@@ -100,6 +124,12 @@ export function parseArgs(args: readonly string[]): CliOptions {
     switch (option) {
       case "--days":
         parsed.days = parseDays(requireValue(args, index, option));
+        index += 1;
+        break;
+      case "--history-years":
+        parsed.historyYears = parseHistoryYears(
+          requireValue(args, index, option),
+        );
         index += 1;
         break;
       case "--json":

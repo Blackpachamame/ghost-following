@@ -139,7 +139,7 @@ it("starts historical lookup immediately before a custom recent period", () => {
     new Date("2026-08-22T00:00:00.000Z"),
     180,
   );
-  const historical = createHistoricalPeriods(recent);
+  const historical = createHistoricalPeriods(recent, 5);
 
   assert.equal(historical[0]?.to, "2026-02-22T23:59:59.999Z");
   assert.ok(new Date(historical[0]?.to ?? 0) < new Date(recent.from));
@@ -161,10 +161,10 @@ it("creates five adjacent historical windows before the recent period", () => {
   };
 
   assert.equal(
-    createHistoricalLookbackStart(recent),
+    createHistoricalLookbackStart(recent, 5),
     "2019-02-28T12:00:00.000Z",
   );
-  assert.deepEqual(createHistoricalPeriods(recent), [
+  assert.deepEqual(createHistoricalPeriods(recent, 5), [
     {
       from: "2023-02-28T12:00:00.000Z",
       to: "2024-02-29T11:59:59.999Z",
@@ -191,4 +191,13 @@ it("creates five adjacent historical windows before the recent period", () => {
       days: 365,
     },
   ]);
+});
+
+it("creates exactly the explicitly requested number of historical windows", () => {
+  const recent = createActivityPeriod(new Date("2026-08-22T00:00:00.000Z"));
+  for (const years of [1, 2, 3, 4, 5]) {
+    assert.equal(createHistoricalPeriods(recent, years).length, years);
+  }
+  assert.throws(() => createHistoricalPeriods(recent, 0), RangeError);
+  assert.throws(() => createHistoricalPeriods(recent, 6), RangeError);
 });

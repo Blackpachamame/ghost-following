@@ -1,7 +1,7 @@
 import type { FollowedAccount } from "./account.js";
 
 export const ACTIVITY_PERIOD_DAYS = 365;
-export const HISTORICAL_LOOKBACK_YEARS = 5;
+export const MAX_HISTORICAL_LOOKBACK_YEARS = 5;
 
 export type ActivityStatus =
   | "ACTIVE"
@@ -33,7 +33,8 @@ export interface AccountActivity {
 export type HistoricalLookupStatus =
   | "FOUND"
   | "NOT_FOUND_IN_LOOKBACK"
-  | "FAILED";
+  | "FAILED"
+  | "NOT_REQUESTED";
 
 export interface AccountActivityResult {
   account: FollowedAccount;
@@ -90,13 +91,14 @@ function subtractCalendarYears(date: Date, years: number): Date {
 
 export function createHistoricalLookbackStart(
   period: ActivityPeriod,
-  years = HISTORICAL_LOOKBACK_YEARS,
+  years: number,
 ): string {
   const recentStart = new Date(period.from);
   if (
     Number.isNaN(recentStart.getTime()) ||
     !Number.isSafeInteger(years) ||
-    years <= 0
+    years <= 0 ||
+    years > MAX_HISTORICAL_LOOKBACK_YEARS
   ) {
     throw new RangeError("Historical lookback requires a valid period and year count.");
   }
@@ -105,7 +107,7 @@ export function createHistoricalLookbackStart(
 
 export function createHistoricalPeriods(
   period: ActivityPeriod,
-  years = HISTORICAL_LOOKBACK_YEARS,
+  years: number,
 ): ActivityPeriod[] {
   createHistoricalLookbackStart(period, years);
 

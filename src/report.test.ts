@@ -68,10 +68,17 @@ it("formats and orders activity details by semantic status", () => {
     type: "User",
     htmlUrl: "https://github.com/failed",
   };
+  const notRequestedAccount = {
+    login: "not-requested",
+    id: 6,
+    type: "User",
+    htmlUrl: "https://github.com/not-requested",
+  };
   const analysis: ActivityAnalysis = {
     period,
-    followingTotal: 6,
-    eligibleUsers: 5,
+    historyYears: 3,
+    followingTotal: 7,
+    eligibleUsers: 6,
     unsupportedAccounts: 1,
     results: [
       {
@@ -88,6 +95,26 @@ it("formats and orders activity details by semantic status", () => {
           totalPullRequestReviewContributions: 1,
           restrictedContributionsCount: 0,
           hasAnyContributions: true,
+          hasAnyRestrictedContributions: false,
+          hasActivityInThePast: false,
+        },
+      },
+      {
+        account: notRequestedAccount,
+        status: "NO_RECENT_VISIBLE_ACTIVITY",
+        lastVisibleActivityAt: null,
+        historicalLookupStatus: "NOT_REQUESTED",
+        activity: {
+          login: "not-requested",
+          periodStart: period.from,
+          periodEnd: period.to,
+          totalContributions: 0,
+          totalCommitContributions: 0,
+          totalIssueContributions: 0,
+          totalPullRequestContributions: 0,
+          totalPullRequestReviewContributions: 0,
+          restrictedContributionsCount: 0,
+          hasAnyContributions: false,
           hasAnyRestrictedContributions: false,
           hasActivityInThePast: false,
         },
@@ -157,11 +184,11 @@ it("formats and orders activity details by semantic status", () => {
     ],
     counts: {
       ACTIVE: 1,
-      NO_RECENT_VISIBLE_ACTIVITY: 3,
+      NO_RECENT_VISIBLE_ACTIVITY: 4,
       INSUFFICIENT_VISIBILITY: 0,
       UNKNOWN: 1,
     },
-    coverage: (4 / 5) * 100,
+    coverage: (5 / 6) * 100,
     rateLimit: {
       cost: 1,
       limit: 5000,
@@ -177,16 +204,61 @@ it("formats and orders activity details by semantic status", () => {
     restRateLimit: { limit: 5000, remaining: 4998 },
   }));
 
-  assert.match(output, /Eligible users: 5/);
-  assert.match(output, /Coverage: 80\.0%/);
-  assert.match(output, /USERNAME\s+LAST VISIBLE ACTIVITY\s+PAST ACTIVITY\s+STATUS/);
+  assert.match(output, /Eligible users: 6/);
+  assert.match(output, /Coverage: 83\.3%/);
+  assert.match(output, /Historical lookup: up to 3 years/);
+  assert.match(output, /USERNAME\s+LAST VISIBLE ACTIVITY\s+STATUS/);
+  assert.doesNotMatch(output, /PAST ACTIVITY/);
   assert.doesNotMatch(output, /no past activity/i);
-  assert.match(output, /failed\s+lookup failed\s+no\s+NO_RECENT_VISIBLE_ACTIVITY/);
-  assert.match(output, /quiet\s+2024-09-17\s+no\s+NO_RECENT_VISIBLE_ACTIVITY/);
-  assert.match(output, /not-found\s+not found in 5y\s+yes\s+NO_RECENT_VISIBLE_ACTIVITY/);
+  assert.match(output, /failed\s+lookup failed\s+NO_RECENT_VISIBLE_ACTIVITY/);
+  assert.match(output, /quiet\s+2024-09-17\s+NO_RECENT_VISIBLE_ACTIVITY/);
+  assert.doesNotMatch(output, /quiet\s+2024-09-17\s+no/);
+  assert.match(output, /not-requested\s+not requested\s+NO_RECENT_VISIBLE_ACTIVITY/);
+  assert.match(output, /not-found\s+not found in 3y\s+NO_RECENT_VISIBLE_ACTIVITY/);
+  assert.ok(output.indexOf("not-requested") < output.indexOf("not-found"));
   assert.ok(output.indexOf("not-found") < output.indexOf("failed"));
   assert.ok(output.indexOf("failed") < output.indexOf("quiet"));
   assert.ok(output.indexOf("quiet") < output.indexOf("unknown"));
   assert.ok(output.indexOf("unknown") < output.indexOf("active"));
   assert.match(output, /Remaining: 4997 \/ 5000/);
+
+  const defaultOutput = formatActivityReport(
+    createAuditResult({
+      user: "owner",
+      generatedAt: new Date("2026-08-22T00:00:00.000Z"),
+      analysis: {
+        ...analysis,
+        historyYears: 0,
+        followingTotal: 1,
+        eligibleUsers: 1,
+        unsupportedAccounts: 0,
+        results: [analysis.results[1]!],
+        counts: {
+          ACTIVE: 0,
+          NO_RECENT_VISIBLE_ACTIVITY: 1,
+          INSUFFICIENT_VISIBILITY: 0,
+          UNKNOWN: 0,
+        },
+        coverage: 100,
+      },
+      restRateLimit: {},
+    }),
+  );
+  assert.match(defaultOutput, /Historical lookup: disabled/);
+  assert.match(defaultOutput, /not requested/);
+
+  for (const [historyYears, expected] of [
+    [1, "Historical lookup: up to 1 year"],
+    [2, "Historical lookup: up to 2 years"],
+  ] as const) {
+    const wording = formatActivityReport(
+      createAuditResult({
+        user: "owner",
+        generatedAt: new Date("2026-08-22T00:00:00.000Z"),
+        analysis: { ...analysis, historyYears },
+        restRateLimit: {},
+      }),
+    );
+    assert.match(wording, new RegExp(expected));
+  }
 });

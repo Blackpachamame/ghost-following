@@ -11,6 +11,7 @@ import type {
   AccountActivityResult,
   ActivityPeriod,
 } from "./domain/activity.js";
+import { MAX_HISTORICAL_LOOKBACK_YEARS } from "./domain/activity.js";
 import type { GraphQLRateLimit } from "./github/graphql.js";
 
 export const CHECKPOINT_SCHEMA_VERSION = 1;
@@ -26,6 +27,7 @@ export interface AuditCheckpoint {
   schemaVersion: typeof CHECKPOINT_SCHEMA_VERSION;
   username: string;
   period: ActivityPeriod;
+  historyYears: number;
   createdAt: string;
   updatedAt: string;
   followingSnapshot: FollowedAccount[];
@@ -179,15 +181,18 @@ export function createCheckpoint(
   period: ActivityPeriod,
   following: readonly FollowedAccount[],
   now = new Date(),
+  historyYears = 0,
 ): AuditCheckpoint {
   if (Number.isNaN(now.getTime())) {
     throw new RangeError("Checkpoint requires a valid creation date.");
   }
   const timestamp = now.toISOString();
+  const validatedHistoryYears = validateHistoryYears(historyYears);
   return {
     schemaVersion: CHECKPOINT_SCHEMA_VERSION,
     username,
     period,
+    historyYears: validatedHistoryYears,
     createdAt: timestamp,
     updatedAt: timestamp,
     followingSnapshot: [...following],
@@ -344,6 +349,7 @@ export async function loadCheckpoint(path: string): Promise<AuditCheckpoint> {
     schemaVersion: CHECKPOINT_SCHEMA_VERSION,
     username: parsed.username,
     period: validatePeriod(parsed.period),
+    historyYears: validateHistoryYears(parsed.historyYears),
     createdAt: parsed.createdAt,
     updatedAt: parsed.updatedAt,
     followingSnapshot: parsed.followingSnapshot.map(validateAccount),
@@ -361,11 +367,26 @@ export async function loadCheckpoint(path: string): Promise<AuditCheckpoint> {
   return checkpoint;
 }
 
+function validateHistoryYears(value: unknown): number {
+  if (value === undefined) return MAX_HISTORICAL_LOOKBACK_YEARS;
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) < 0 ||
+    (value as number) > MAX_HISTORICAL_LOOKBACK_YEARS
+  ) {
+    throw new CheckpointError(
+      "Checkpoint contains an invalid historical configuration.",
+    );
+  }
+  return value as number;
+}
+
 export function validateResumeCheckpoint(
   checkpoint: AuditCheckpoint,
   username: string,
   requestedDays: number,
-): void {
+  requestedHistoryYears?: number,
+): number {
   if (loginKey(checkpoint.username) !== loginKey(username)) {
     throw new CheckpointError("Checkpoint username does not match requested user.");
   }
@@ -374,6 +395,15 @@ export function validateResumeCheckpoint(
       "Checkpoint period does not match requested audit period.",
     );
   }
+  if (
+    requestedHistoryYears !== undefined &&
+    checkpoint.historyYears !== requestedHistoryYears
+  ) {
+    throw new CheckpointError(
+      `Checkpoint historical configuration (${checkpoint.historyYears} years) does not match requested --history-years ${requestedHistoryYears}.`,
+    );
+  }
+  return checkpoint.historyYears;
 }
 
 export function compareFollowing(

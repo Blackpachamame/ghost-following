@@ -574,6 +574,7 @@ describe("productive recent batching", () => {
       provider,
       period,
       {
+        historyYears: 5,
         completedRecentActivity: [completedRecent, quietRecent],
         completedHistoricalActivity: [quietHistorical],
       },
@@ -624,6 +625,7 @@ describe("productive recent batching", () => {
       provider,
       period,
       {
+        historyYears: 5,
         completedRecentActivity: [quietRecent],
         completedHistoricalActivity: [legacyHistorical],
         onHistoricalAccountCompleted(result) {
@@ -633,7 +635,7 @@ describe("productive recent batching", () => {
     );
 
     assert.equal(recentCalls, 0);
-    assert.deepEqual(requestedPeriods, createHistoricalPeriods(period).slice(0, 1));
+    assert.deepEqual(requestedPeriods, createHistoricalPeriods(period, 5).slice(0, 1));
     assert.equal(analysis.results[0]?.historicalLookupStatus, "FOUND");
     assert.equal(analysis.results[0]?.lastVisibleActivityAt, "2025-08-17");
     assert.equal(analysis.results[0]?.activity?.hasActivityInThePast, false);
@@ -684,6 +686,7 @@ describe("productive recent batching", () => {
       },
       period,
       {
+        historyYears: 5,
         completedRecentActivity: recent,
         completedHistoricalActivity: historical,
       },
@@ -791,6 +794,58 @@ function queryResult(
 }
 
 describe("analyzeFollowingActivity", () => {
+  it("marks quiet accounts NOT_REQUESTED and creates zero historical work by default", async () => {
+    let historicalCalls = 0;
+    const analysis = await analyzeFollowingActivity(
+      [account("quiet-default")],
+      {
+        async getAccountActivity(login) {
+          return queryResult(login, 0, false);
+        },
+        async getHistoricalActivity() {
+          historicalCalls += 1;
+          throw new Error("Historical must remain disabled by default.");
+        },
+      },
+      period,
+    );
+
+    assert.equal(analysis.historyYears, 0);
+    assert.equal(historicalCalls, 0);
+    assert.equal(analysis.results[0]?.historicalLookupStatus, "NOT_REQUESTED");
+    assert.equal(analysis.results[0]?.lastVisibleActivityAt, null);
+    assert.equal(analysis.results[0]?.activity?.hasActivityInThePast, false);
+  });
+
+  for (const historyYears of [1, 3, 5]) {
+    it(`limits historical lookup to ${historyYears} explicit annual windows`, async () => {
+      const requestedPeriods: ActivityPeriod[] = [];
+      const analysis = await analyzeFollowingActivity(
+        [account(`quiet-${historyYears}`)],
+        {
+          async getAccountActivity(login) {
+            return queryResult(login, 0, false);
+          },
+          async getHistoricalActivity(_login, historicalPeriod) {
+            requestedPeriods.push(historicalPeriod);
+            return { lastVisibleActivityAt: null, rateLimit: rateLimit(4900) };
+          },
+        },
+        period,
+        { historyYears },
+      );
+
+      assert.deepEqual(
+        requestedPeriods,
+        createHistoricalPeriods(period, historyYears),
+      );
+      assert.equal(
+        analysis.results[0]?.historicalLookupStatus,
+        "NOT_FOUND_IN_LOOKBACK",
+      );
+    });
+  }
+
   it("excludes non-users, preserves account errors, and enriches quiet users", async () => {
     const requested: string[] = [];
     const historicalRequested: string[] = [];
@@ -820,7 +875,7 @@ describe("analyzeFollowingActivity", () => {
       ],
       provider,
       period,
-      2,
+      { concurrency: 2, historyYears: 5 },
     );
 
     assert.deepEqual(requested.sort(), ["active", "broken", "quiet"]);
@@ -874,6 +929,7 @@ describe("analyzeFollowingActivity", () => {
       [account("robbertjanhermeler-cmd")],
       provider,
       regressionPeriod,
+      { historyYears: 5 },
     );
 
     assert.deepEqual(requestedPeriods, [
@@ -906,9 +962,10 @@ describe("analyzeFollowingActivity", () => {
       [account("not-found-with-false-signal")],
       provider,
       period,
+      { historyYears: 5 },
     );
 
-    assert.deepEqual(requestedPeriods, createHistoricalPeriods(period));
+    assert.deepEqual(requestedPeriods, createHistoricalPeriods(period, 5));
     assert.equal(
       analysis.results[0]?.historicalLookupStatus,
       "NOT_FOUND_IN_LOOKBACK",
@@ -918,7 +975,7 @@ describe("analyzeFollowingActivity", () => {
 
   it("checks annual windows sequentially and stops at the first match", async () => {
     const requestedPeriods: ActivityPeriod[] = [];
-    const expectedPeriods = createHistoricalPeriods(period);
+    const expectedPeriods = createHistoricalPeriods(period, 5);
     const provider: ActivityProvider = {
       async getAccountActivity(login) {
         return queryResult(login, 0, true);
@@ -927,7 +984,7 @@ describe("analyzeFollowingActivity", () => {
         requestedPeriods.push(historicalPeriod);
         return {
           lastVisibleActivityAt:
-            requestedPeriods.length === 3 ? "2023-01-15" : null,
+            requestedPeriods.length === 2 ? "2024-01-15" : null,
           rateLimit: rateLimit(4999 - requestedPeriods.length),
         };
       },
@@ -937,11 +994,12 @@ describe("analyzeFollowingActivity", () => {
       [account("older")],
       provider,
       period,
+      { historyYears: 5 },
     );
 
-    assert.deepEqual(requestedPeriods, expectedPeriods.slice(0, 3));
+    assert.deepEqual(requestedPeriods, expectedPeriods.slice(0, 2));
     assert.equal(analysis.results[0]?.historicalLookupStatus, "FOUND");
-    assert.equal(analysis.results[0]?.lastVisibleActivityAt, "2023-01-15");
+    assert.equal(analysis.results[0]?.lastVisibleActivityAt, "2024-01-15");
   });
 
   it("makes exactly five calls before reporting no match in the lookback", async () => {
@@ -960,9 +1018,10 @@ describe("analyzeFollowingActivity", () => {
       [account("beyond-lookback")],
       provider,
       period,
+      { historyYears: 5 },
     );
 
-    assert.deepEqual(requestedPeriods, createHistoricalPeriods(period));
+    assert.deepEqual(requestedPeriods, createHistoricalPeriods(period, 5));
     assert.equal(requestedPeriods.length, 5);
     assert.equal(
       analysis.results[0]?.historicalLookupStatus,
@@ -989,6 +1048,7 @@ describe("analyzeFollowingActivity", () => {
       [account("active", "User", 1), account("unknown", "User", 2)],
       provider,
       period,
+      { historyYears: 5 },
     );
 
     assert.equal(historicalCalls, 0);
@@ -1017,6 +1077,7 @@ describe("analyzeFollowingActivity", () => {
         [account("quiet")],
         provider,
         period,
+        { historyYears: 5 },
       );
 
       assert.equal(historicalCalls, 1);

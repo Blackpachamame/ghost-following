@@ -59,6 +59,14 @@ function formatDate(date: Date): string {
   return Number.isNaN(date.getTime()) ? "unknown" : date.toISOString();
 }
 
+export function formatSuggestedResumeCommand(
+  username: string,
+  days: number,
+  historyYears: number,
+): string {
+  return `npm run start -- ${username} --days ${days}${historyYears === 0 ? "" : ` --history-years ${historyYears}`} --resume`;
+}
+
 export async function runCli(
   args: readonly string[],
   options: {
@@ -74,6 +82,8 @@ export async function runCli(
 ): Promise<number> {
   const io = options.io ?? console;
   let progressSavedFor: string | undefined;
+  let progressSavedDays = 0;
+  let progressSavedHistoryYears = 0;
 
   try {
     const cliOptions = parseArgs(args);
@@ -106,9 +116,15 @@ export async function runCli(
     );
     let checkpoint: AuditCheckpoint;
     let period;
+    let historyYears: number;
     if (cliOptions.resume) {
       checkpoint = await loadCheckpoint(checkpointPath);
-      validateResumeCheckpoint(checkpoint, username, cliOptions.days);
+      historyYears = validateResumeCheckpoint(
+        checkpoint,
+        username,
+        cliOptions.days,
+        cliOptions.historyYears,
+      );
       period = checkpoint.period;
       const changes = compareFollowing(
         checkpoint.followingSnapshot,
@@ -125,12 +141,14 @@ export async function runCli(
       }
       checkpoint.followingSnapshot = [...following.accounts];
     } else {
+      historyYears = cliOptions.historyYears ?? 0;
       period = createActivityPeriod(startedAt, cliOptions.days);
       checkpoint = createCheckpoint(
         username,
         period,
         following.accounts,
         startedAt,
+        historyYears,
       );
     }
     const checkpointWriter = new CheckpointWriter(checkpointPath);
@@ -141,6 +159,8 @@ export async function runCli(
     });
     await checkpointWriter.save(checkpoint, startedAt);
     progressSavedFor = username;
+    progressSavedDays = period.days;
+    progressSavedHistoryYears = historyYears;
 
     const saveCheckpoint = (): Promise<void> =>
       checkpointWriter.save(checkpoint);
@@ -150,14 +170,9 @@ export async function runCli(
       io,
       ACTIVITY_BATCH_SIZE,
     );
-    const historicalProgress = createProgressReporter(
-      "Analyzing historical activity",
-      checkpointRecentResults(checkpoint).filter(
-        ({ status }) => status === "NO_RECENT_VISIBLE_ACTIVITY",
-      ).length,
-      io,
-      10,
-    );
+    let historicalProgress:
+      | ((completed: number, actualTotal: number) => void)
+      | undefined;
     const savedRateLimit = checkpointRateLimit(checkpoint);
     const reusableRateLimit =
       savedRateLimit?.remaining === 0 &&
@@ -172,6 +187,7 @@ export async function runCli(
         ...(options.concurrency === undefined
           ? {}
           : { concurrency: options.concurrency }),
+        historyYears,
         completedRecentActivity: checkpointRecentResults(checkpoint),
         completedHistoricalActivity: checkpointHistoricalResults(checkpoint),
         ...(reusableRateLimit === undefined
@@ -200,6 +216,12 @@ export async function runCli(
           recordHistoricalResult(checkpoint, result);
           recordRateLimit(checkpoint, rateLimit);
           await saveCheckpoint();
+          historicalProgress ??= createProgressReporter(
+            "Analyzing historical activity",
+            total,
+            io,
+            10,
+          );
           historicalProgress(completed, total);
         },
       },
@@ -266,7 +288,11 @@ export async function runCli(
         lines.push(
           "",
           "Run:",
-          `  npm run start -- ${progressSavedFor} --resume`,
+          `  ${formatSuggestedResumeCommand(
+            progressSavedFor,
+            progressSavedDays,
+            progressSavedHistoryYears,
+          )}`,
         );
         io.error(lines.join("\n"));
         return 1;

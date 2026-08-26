@@ -72,6 +72,7 @@ describe("audit checkpoint", () => {
       period,
       [user],
       new Date("2026-08-24T00:00:00.000Z"),
+      3,
     );
     const recent = result(user, 0);
     recordRecentResults(checkpoint, [recent]);
@@ -97,6 +98,7 @@ describe("audit checkpoint", () => {
       assert.equal(loaded.schemaVersion, 1);
       assert.equal(loaded.username, "Owner");
       assert.deepEqual(loaded.period, period);
+      assert.equal(loaded.historyYears, 3);
       assert.equal(checkpointRecentResults(loaded).length, 1);
       assert.equal(checkpointHistoricalResults(loaded).length, 1);
       assert.equal(loaded.updatedAt, "2026-08-24T00:02:00.000Z");
@@ -119,6 +121,7 @@ describe("audit checkpoint", () => {
     const user = account("legacy", 1);
     const recent = result(user, 0);
     const checkpoint = createCheckpoint("Owner", period, [user]);
+    delete (checkpoint as Partial<AuditCheckpoint>).historyYears;
     recordRecentResults(checkpoint, [recent]);
     (checkpoint.completedHistoricalActivity as Record<string, unknown>)[
       "legacy"
@@ -136,6 +139,7 @@ describe("audit checkpoint", () => {
       };
 
       assert.equal(loaded.schemaVersion, 1);
+      assert.equal(loaded.historyYears, 5);
       assert.equal(legacy.historicalLookupStatus, "NO_PAST_ACTIVITY");
     } finally {
       await rm(tempDirectory, { recursive: true, force: true });
@@ -154,6 +158,22 @@ describe("audit checkpoint", () => {
     );
     assert.doesNotThrow(() =>
       validateResumeCheckpoint(checkpoint, "owner", 180),
+    );
+  });
+
+  it("inherits resume history when omitted and rejects an explicit mismatch", () => {
+    const checkpoint = createCheckpoint("Owner", period, [], new Date(), 3);
+    assert.equal(
+      validateResumeCheckpoint(checkpoint, "owner", 180),
+      3,
+    );
+    assert.equal(
+      validateResumeCheckpoint(checkpoint, "owner", 180, 3),
+      3,
+    );
+    assert.throws(
+      () => validateResumeCheckpoint(checkpoint, "owner", 180, 1),
+      /historical configuration \(3 years\).*--history-years 1/,
     );
   });
 

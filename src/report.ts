@@ -1,8 +1,5 @@
 import { groupAccountsByType, type FollowedAccount } from "./domain/account.js";
-import {
-  HISTORICAL_LOOKBACK_YEARS,
-  type ActivityStatus,
-} from "./domain/activity.js";
+import { type ActivityStatus } from "./domain/activity.js";
 import type { AccountAuditResult, AuditResult } from "./domain/audit.js";
 import type { RateLimitSnapshot } from "./github/client.js";
 
@@ -88,24 +85,32 @@ function formatTable(rows: readonly string[][]): string[] {
   );
 }
 
-function candidateDate(result: AccountAuditResult): string {
+function candidateDate(
+  result: AccountAuditResult,
+  historyYears: number,
+): string {
   if (result.lastVisibleActivityAt !== null) {
     return result.lastVisibleActivityAt;
   }
   if (result.historicalLookupStatus === "FAILED") return "lookup failed";
-  return `not found in ${HISTORICAL_LOOKBACK_YEARS}y`;
+  if (result.historicalLookupStatus === "NOT_REQUESTED") {
+    return "not requested";
+  }
+  return `not found in ${historyYears}y`;
 }
 
 function candidateRank(result: AccountAuditResult): number {
   switch (result.historicalLookupStatus) {
-    case "NOT_FOUND_IN_LOOKBACK":
+    case "NOT_REQUESTED":
       return 0;
-    case "FAILED":
+    case "NOT_FOUND_IN_LOOKBACK":
       return 1;
-    case "FOUND":
+    case "FAILED":
       return 2;
-    default:
+    case "FOUND":
       return 3;
+    default:
+      return 4;
   }
 }
 
@@ -141,11 +146,10 @@ export function formatActivityReport(audit: AuditResult): string {
     return leftTotal - rightTotal || left.login.localeCompare(right.login);
     });
   const candidateTable = formatTable([
-    ["USERNAME", "LAST VISIBLE ACTIVITY", "PAST ACTIVITY", "STATUS"],
+    ["USERNAME", "LAST VISIBLE ACTIVITY", "STATUS"],
     ...candidates.map((result) => [
       result.login,
-      candidateDate(result),
-      result.hasActivityInThePast === true ? "yes" : "no",
+      candidateDate(result, audit.history.years),
       result.status,
     ]),
   ]);
@@ -162,6 +166,7 @@ export function formatActivityReport(audit: AuditResult): string {
     "",
     `User: ${audit.user}`,
     `Period: last ${audit.period.days} days`,
+    `Historical lookup: ${audit.history.years === 0 ? "disabled" : `up to ${audit.history.years} ${audit.history.years === 1 ? "year" : "years"}`}`,
     "",
     "Following",
     "---------",

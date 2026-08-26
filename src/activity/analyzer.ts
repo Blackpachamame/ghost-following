@@ -2,6 +2,7 @@ import {
   calculateCoverage,
   classifyActivity,
   createHistoricalPeriods,
+  MAX_HISTORICAL_LOOKBACK_YEARS,
   type AccountActivityResult,
   type ActivityPeriod,
   type ActivityStatus,
@@ -47,6 +48,7 @@ export interface ActivityCounts {
 
 export interface ActivityAnalysis {
   period: ActivityPeriod;
+  historyYears: number;
   followingTotal: number;
   eligibleUsers: number;
   unsupportedAccounts: number;
@@ -78,6 +80,7 @@ export interface ActivityProvider {
 
 export interface ActivityAnalysisOptions {
   concurrency?: number;
+  historyYears?: number;
   initialRateLimit?: GraphQLRateLimit;
   completedRecentActivity?: readonly AccountActivityResult[];
   completedHistoricalActivity?: readonly AccountActivityResult[];
@@ -508,6 +511,16 @@ export async function analyzeFollowingActivity(
       ? { concurrency: optionsOrConcurrency }
       : optionsOrConcurrency;
   const concurrency = options.concurrency ?? DEFAULT_GRAPHQL_CONCURRENCY;
+  const historyYears = options.historyYears ?? 0;
+  if (
+    !Number.isSafeInteger(historyYears) ||
+    historyYears < 0 ||
+    historyYears > MAX_HISTORICAL_LOOKBACK_YEARS
+  ) {
+    throw new RangeError(
+      `Historical year count must be an integer from 0 to ${MAX_HISTORICAL_LOOKBACK_YEARS}.`,
+    );
+  }
   const eligibleAccounts = accounts.filter(({ type }) => type === "User");
   const recentByLogin = mapSavedResults(
     options.completedRecentActivity,
@@ -564,6 +577,29 @@ export async function analyzeFollowingActivity(
   const historicalCandidates = recentResults.filter(
     ({ status }) => status === "NO_RECENT_VISIBLE_ACTIVITY",
   );
+  if (historyYears === 0) {
+    const results = recentResults.map((recent) =>
+      recent.status === "NO_RECENT_VISIBLE_ACTIVITY"
+        ? {
+            ...recent,
+            lastVisibleActivityAt: null,
+            historicalLookupStatus: "NOT_REQUESTED" as const,
+          }
+        : recent,
+    );
+    const analysis: ActivityAnalysis = {
+      period,
+      historyYears,
+      followingTotal: accounts.length,
+      eligibleUsers: eligibleAccounts.length,
+      unsupportedAccounts: accounts.length - eligibleAccounts.length,
+      results,
+      counts: countStatuses(results),
+      coverage: calculateCoverage(results, eligibleAccounts.length),
+    };
+    if (latestRateLimit !== undefined) analysis.rateLimit = latestRateLimit;
+    return analysis;
+  }
   const historicalByLogin = mapSavedResults(
     options.completedHistoricalActivity,
     eligibleAccounts,
@@ -576,7 +612,7 @@ export async function analyzeFollowingActivity(
   const pendingHistorical = historicalCandidates.filter(
     ({ account }) => !historicalByLogin.has(loginKey(account.login)),
   );
-  const historicalPeriods = createHistoricalPeriods(period);
+  const historicalPeriods = createHistoricalPeriods(period, historyYears);
   let historicalCompleted = historicalCandidates.length - pendingHistorical.length;
 
   const historicalWorkResults = await mapWithConcurrency(
@@ -618,6 +654,7 @@ export async function analyzeFollowingActivity(
   });
   const analysis: ActivityAnalysis = {
     period,
+    historyYears,
     followingTotal: accounts.length,
     eligibleUsers: eligibleAccounts.length,
     unsupportedAccounts: accounts.length - eligibleAccounts.length,

@@ -2,7 +2,7 @@
 
 GitHub Ghost Following es una herramienta CLI open source para analizar señales de actividad que GitHub expone oficialmente para las cuentas seguidas por un usuario.
 
-La CLI recupera el `following` público completo mediante la API REST y analiza las cuentas cuyo `type` es `User` mediante la API GraphQL oficial y `ContributionsCollection`. El análisis reciente usa un período UTC configurable, de 365 días por defecto, y busca de forma limitada la última contribución visible de los candidatos sin actividad reciente.
+La CLI recupera el `following` público completo mediante la API REST y analiza las cuentas cuyo `type` es `User` mediante la API GraphQL oficial y `ContributionsCollection`. El análisis reciente usa un período UTC configurable, de 365 días por defecto. El contexto histórico es opcional y está desactivado por defecto.
 
 La herramienta mide **actividad visible**, no actividad real ni productividad. Nunca clasifica una cuenta como “ghost” o “inactiva”.
 
@@ -47,6 +47,7 @@ Opciones disponibles:
 
 ```text
 --days <number>     Activity period in days (default: 365)
+--history-years <1-5> Look back up to N years for quiet accounts (default: disabled)
 --json <path>       Export full audit as JSON
 --csv <path>        Export account audit as CSV
 --resume            Resume a compatible saved audit
@@ -57,13 +58,16 @@ Ejemplos:
 
 ```bash
 npm run start -- Blackpachamame --days 180
+npm run start -- Blackpachamame --history-years 1
+npm run start -- Blackpachamame --history-years 3
+npm run start -- Blackpachamame --history-years 5
 npm run start -- Blackpachamame --days 180 --resume
 npm run start -- Blackpachamame --json reports/audit.json
 npm run start -- Blackpachamame --days 180 --json reports/audit.json --csv reports/audit.csv
 npm run start -- --help
 ```
 
-`--days` acepta cualquier entero positivo representable; el valor modifica tanto la query reciente como `Period: last ... days`. El lookup histórico comienza inmediatamente antes del período reciente y mantiene su límite independiente de cinco años.
+`--days` acepta cualquier entero positivo representable; el valor modifica tanto la query reciente como `Period: last ... days`. Sin `--history-years`, el audit sólo ejecuta recent y realiza cero queries históricas. `--history-years` acepta cualquier entero entre 1 y 5; el lookup comienza inmediatamente antes del período reciente y consulta como máximo esa cantidad de ventanas anuales.
 
 El token sólo se lee desde el entorno y se envía a GitHub en el header de autenticación. No se imprime, solicita interactivamente ni almacena. Los archivos `.env` están ignorados, aunque el proyecto no los carga automáticamente.
 
@@ -95,6 +99,9 @@ El JSON representa la auditoría completa sin depender del texto de terminal. In
     "days": 180,
     "from": "2026-02-24T03:07:24.000Z",
     "to": "2026-08-23T03:07:24.000Z"
+  },
+  "history": {
+    "years": 0
   },
   "summary": {
     "followingTotal": 80,
@@ -130,10 +137,11 @@ Los campos no aplicables por cuenta se representan como `null`. Nunca se exporta
 El CSV contiene una fila por cuenta `User` elegible y estas columnas:
 
 ```text
-login,profile_url,status,period_days,total_contributions,commits,pull_requests,reviews,issues,restricted_contributions,has_activity_in_past,last_visible_activity,historical_lookup_status
+login,profile_url,status,period_days,total_contributions,commits,pull_requests,reviews,issues,restricted_contributions,has_activity_in_past,last_visible_activity,historical_lookup_status,history_years
 ```
 
 Los valores `null` se escriben como campos vacíos. Comas, comillas y saltos de línea se escapan según las reglas de CSV.
+La columna aditiva `history_years` se encuentra al final; todas las columnas anteriores conservan su orden histórico.
 
 ## Qué se analiza
 
@@ -179,7 +187,7 @@ Las contribuciones privadas sólo se usan como señal cuando la persona habilit�
 
 ## Last visible activity
 
-Para todas las cuentas clasificadas como `NO_RECENT_VISIBLE_ACTIVITY`, la herramienta consulta ventanas históricas explícitas con `ContributionsCollection(from, to)`. Comienza inmediatamente antes del período reciente, sin solaparlo, avanza hacia atrás una ventana anual por vez y se detiene en cuanto encuentra actividad. `hasActivityInThePast` se conserva en reportes y exports como metadata informativa, pero no controla este lookup: se observó que una ventana explícita puede encontrar actividad visible aunque esa señal sea `false`.
+Cuando se usa `--history-years N`, la herramienta consulta para las cuentas `NO_RECENT_VISIBLE_ACTIVITY` hasta N ventanas históricas explícitas con `ContributionsCollection(from, to)`. Comienza inmediatamente antes del período reciente, sin solaparlo, avanza hacia atrás una ventana anual por vez y se detiene en cuanto encuentra actividad. `hasActivityInThePast` se conserva en reportes y exports como metadata informativa, pero nunca controla este lookup: una ventana explícita puede encontrar actividad visible aunque esa señal sea `false`.
 
 En cada ventana elige la fecha más reciente entre:
 
@@ -188,13 +196,14 @@ En cada ventana elige la fecha más reciente entre:
 
 La decisión no depende sólo de `totalContributions`: también considera `hasAnyContributions`, `hasAnyRestrictedContributions`, `restrictedContributionsCount` y `latestRestrictedContributionDate`. Si GitHub indica actividad pero no entrega una fecha atribuible, la ventana se considera no interpretable en lugar de inventar un resultado.
 
-El lookback es de 5 años, definido por `HISTORICAL_LOOKBACK_YEARS`. El lookup distingue estos resultados:
+El máximo configurable es de 5 años, definido por `MAX_HISTORICAL_LOOKBACK_YEARS`. El lookup distingue estos resultados:
 
 - `FOUND`: encontró una fecha pública o restringida visible;
-- `NOT_FOUND_IN_LOOKBACK`: ninguna de las cinco ventanas contiene una fecha visible;
-- `FAILED`: falló la búsqueda histórica de esa cuenta.
+- `NOT_FOUND_IN_LOOKBACK`: historical fue solicitado y ninguna de las N ventanas consultadas contiene una fecha visible;
+- `FAILED`: historical fue solicitado, pero la búsqueda no pudo completarse para esa cuenta;
+- `NOT_REQUESTED`: historical no fue solicitado para este audit y no se ejecutó.
 
-Los resultados sin fecha se muestran como `not found in 5y` o `lookup failed`, según corresponda. `NOT_FOUND_IN_LOOKBACK` no demuestra ausencia histórica absoluta: puede existir actividad anterior al lookback, privada o no visible para quien ejecuta la consulta. Un fallo histórico conserva el estado principal `NO_RECENT_VISIBLE_ACTIVITY`.
+Los resultados sin fecha se muestran como `not requested`, `not found in Ny` o `lookup failed`, según corresponda. `NOT_REQUESTED` significa exclusivamente que no se buscó; `NOT_FOUND_IN_LOOKBACK` significa que sí se buscó y no se encontró una contribución visible dentro del alcance configurado. Ninguno demuestra inactividad absoluta: puede existir actividad anterior al lookback, privada o no visible para quien ejecuta la consulta. Historical es contexto complementario; la clasificación `NO_RECENT_VISIBLE_ACTIVITY` depende solamente del período recent.
 
 Reports generados antes de esta corrección pueden contener el valor legacy `NO_PAST_ACTIVITY`. Los checkpoints schema 1 que lo contengan siguen siendo compatibles: `--resume` conserva el resultado recent y vuelve a ejecutar sólo el lookup historical de esa cuenta.
 
@@ -217,6 +226,7 @@ GitHub Ghost Following
 
 User: Blackpachamame
 Period: last 365 days
+Historical lookup: disabled
 
 Following
 ---------
@@ -235,10 +245,10 @@ Coverage: 100.0%
 
 Candidates
 
-USERNAME  LAST VISIBLE ACTIVITY  PAST ACTIVITY  STATUS
-new-user  not found in 5y        no             NO_RECENT_VISIBLE_ACTIVITY
-quiet     lookup failed          yes            NO_RECENT_VISIBLE_ACTIVITY
-bob       2024-09-17             no             NO_RECENT_VISIBLE_ACTIVITY
+USERNAME  LAST VISIBLE ACTIVITY  STATUS
+new-user  not requested          NO_RECENT_VISIBLE_ACTIVITY
+quiet     lookup failed          NO_RECENT_VISIBLE_ACTIVITY
+bob       2024-09-17             NO_RECENT_VISIBLE_ACTIVITY
 
 Other activity details
 
@@ -246,7 +256,7 @@ USERNAME  TOTAL  COMMITS  PRS  REVIEWS  ISSUES  RESTRICTED  STATUS
 alice     824    710      42   61       11      220         ACTIVE
 ```
 
-Los candidatos sin fecha encontrada dentro del lookback aparecen primero, seguidos por los lookups fallidos y finalmente los resultados con fecha desde la más antigua hasta la más reciente. El resto se ordena por `INSUFFICIENT_VISIBILITY`, `UNKNOWN` y `ACTIVE`; actualmente el producto no genera el primer estado.
+Los candidatos se ordenan por `NOT_REQUESTED`, `NOT_FOUND_IN_LOOKBACK`, `FAILED` y finalmente `FOUND` desde la fecha más antigua hasta la más reciente. El resto se ordena por `INSUFFICIENT_VISIBILITY`, `UNKNOWN` y `ACTIVE`; actualmente el producto no genera el primer estado.
 
 ## Cuentas grandes y batching
 
@@ -277,11 +287,14 @@ La escritura captura un snapshot consistente, lo guarda en un temporal único y 
 Una ejecución normal comienza fresca y sobrescribe un checkpoint anterior. Para continuar explícitamente:
 
 ```bash
-npm run start -- Blackpachamame --resume
+npm run start -- Blackpachamame --days 365 --resume
 npm run start -- Blackpachamame --days 180 --resume
+npm run start -- Blackpachamame --days 365 --history-years 3 --resume
 ```
 
-`--resume` reutiliza el período exacto guardado y omite usuarios recientes e históricos ya completados. Los días solicitados deben coincidir; un checkpoint de 365 días no puede reanudarse con `--days 180`.
+`--resume` reutiliza el período exacto y `historyYears` guardados, y omite usuarios recientes e históricos ya completados. Si se omite `--history-years`, hereda el valor del checkpoint; si se indica, debe coincidir o el resume termina con un error de configuración incompatible. Los checkpoints schema 1 anteriores que no poseen `historyYears` se interpretan como audits legacy de 5 años. Los días solicitados también deben coincidir.
+
+Sin `--resume`, una ejecución siempre es fresca: no reutiliza resultados, no hereda `historyYears` y no compara la configuración con un checkpoint anterior. Los argumentos de la nueva ejecución son la única autoridad.
 
 El following se consulta nuevamente. Si cambió, la CLI informa las cantidades agregadas y eliminadas, conserva resultados de cuentas aún seguidas, analiza las nuevas y excluye del resultado final las removidas.
 
@@ -303,7 +316,7 @@ Si un batch reciente agota los tres intentos con HTTP 502 o 504, muestra los log
 
 El incidente contiene únicamente timestamp, usuario auditado, período recent, status HTTP, intentos y logins del batch. No contiene token, headers, request GraphQL, calendarios ni responses. El archivo es local, acumulativo y está cubierto por el ignore de `.ghost-following/`. Si no puede escribirse, la CLI muestra una advertencia sin cambiar el comportamiento de recuperación o error del audit.
 
-La búsqueda histórica se ejecuta para todos los candidatos sin actividad reciente. Las ventanas de una misma cuenta se consultan secuencialmente para poder detenerse en el primer resultado; distintas cuentas sí comparten el pool de cuatro workers. Se generan como máximo 5 queries adicionales por candidato. Con 30 candidatos, el peor caso teórico es de unas 150 queries históricas adicionales.
+La búsqueda histórica sólo se ejecuta cuando se solicita con `--history-years`. Las ventanas de una misma cuenta se consultan secuencialmente para poder detenerse en el primer resultado; distintas cuentas sí comparten el pool de cuatro workers. Sin el flag se generan cero trabajos y cero queries históricas. Con `--history-years 5` y 30 candidatos, el peor caso teórico sigue siendo de unas 150 queries históricas adicionales.
 
 El coste GraphQL no se presupone; se muestra el último coste observado que GitHub devuelve.
 
@@ -353,7 +366,7 @@ El benchmark usa APIs reales, requiere `GITHUB_TOKEN` y consume rate limit. La q
 ## Limitaciones actuales
 
 - El período reciente es configurable con `--days` y usa 365 días por defecto.
-- `last visible activity` está limitada a lo que GitHub expone mediante `ContributionsCollection` dentro de cinco años anteriores al comienzo del período reciente; una fecha ausente no significa necesariamente que la cuenta nunca haya contribuido.
+- Cuando se solicita, `last visible activity` está limitada a lo que GitHub expone mediante `ContributionsCollection` dentro de 1 a 5 años anteriores al comienzo del período reciente; una fecha ausente no significa necesariamente que la cuenta nunca haya contribuido.
 - No hay activity score, interfaz web, backend, base de datos, OAuth, caché ni unfollow.
 - El lookup histórico sigue procesando cuentas individualmente; sólo el análisis reciente usa batching.
 - La actividad privada sólo puede observarse cuando GitHub muestra su conteo anonimizado.
