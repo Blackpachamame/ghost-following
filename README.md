@@ -352,6 +352,19 @@ npm run diagnose:recent-query -- --help
 
 `--timestamp` selecciona exactamente un incidente, `--source` permite leer un JSONL archivado y `--runs` acepta de 1 a 3 repeticiones (default 1). El comando consume GraphQL real cuando se ejecuta, pero no hace REST, historical, audit, checkpoints ni exports; tampoco modifica la clasificación productiva o el failure JSONL. Ejecuta todo secuencialmente, no aplica adaptive split oculto y guarda un JSON seguro bajo `.ghost-following/diagnostics/query-comparisons/`.
 
+### Recent batch composition probe
+
+El probe experimental de composición/tamaño usa exclusivamente la query recent `CURRENT` sobre un incidente guardado. `FULL` selecciona todo el batch fuente; `LEFT` toma los primeros `floor(N/2)` logins y `RIGHT` el resto. Los nombres de target son case-insensitive y el default es `FULL`.
+
+```bash
+npm run diagnose:recent-composition -- PratikDhanave --source ".ghost-following/diagnostics/PratikDhanave-failures.jsonl" --timestamp "2026-08-26T13:36:53.707Z" --target RIGHT --runs 1
+npm run diagnose:recent-composition -- --help
+```
+
+Por cada run mide el target, sus dos mitades y tres muestras N-1 (`DROP_FIRST`, `DROP_MIDDLE`, `DROP_LAST`). Después desciende sólo por mitades que reproduzcan 502/504 agotado, `RESOURCE_LIMIT` o body inválido. Cada split es una medición observable, no recovery productivo. `--runs` acepta 1 a 3 y `--source` permite leer un JSONL archivado.
+
+El comando puede consumir múltiples requests GraphQL reales. No hace audit, REST, historical, checkpoints ni exports; no cambia producción ni modifica el failure JSONL. Los resultados se guardan bajo `.ghost-following/diagnostics/composition-probes/`. Los outcomes pueden variar por intermitencia del backend, y que un singleton falle no demuestra causalidad individual.
+
 ## Desarrollo
 
 ```bash
