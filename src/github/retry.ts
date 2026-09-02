@@ -70,7 +70,7 @@ export function isRetryableTransportError(error: unknown): boolean {
   return false;
 }
 
-function defaultSleep(delayMs: number): Promise<void> {
+export function defaultSleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 

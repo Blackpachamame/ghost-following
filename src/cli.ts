@@ -59,6 +59,65 @@ function formatDate(date: Date): string {
   return Number.isNaN(date.getTime()) ? "unknown" : date.toISOString();
 }
 
+function formatPrimaryQuota(
+  error: GitHubRateLimitError,
+  scope: "API" | "GraphQL",
+): string | undefined {
+  if (error.remaining === undefined) {
+    return error.limit === undefined
+      ? undefined
+      : `Primary ${scope} quota limit: ${error.limit}`;
+  }
+  return `Primary ${scope} quota remaining: ${error.remaining}${
+    error.limit === undefined ? "" : ` / ${error.limit}`
+  }`;
+}
+
+function formatRateLimitLines(
+  error: GitHubRateLimitError,
+  scope: "API" | "GraphQL",
+  progressSaved: boolean,
+): string[] {
+  const lines: string[] = [];
+  if (error.kind === "PRIMARY") {
+    lines.push(`GitHub ${scope} primary rate limit exhausted.`);
+  } else if (error.kind === "SECONDARY") {
+    lines.push(`GitHub ${scope} secondary rate limit reached.`);
+  } else {
+    lines.push(
+      `GitHub ${scope} rate limit encountered.`,
+      "The response did not provide enough information to classify it as primary or secondary.",
+    );
+  }
+
+  if (progressSaved) lines.push("Progress saved.");
+
+  const quota = formatPrimaryQuota(error, scope);
+  if (quota !== undefined) lines.push(quota);
+
+  if (error.kind === "PRIMARY" && error.resetAt !== undefined) {
+    lines.push(`Primary limit resets at: ${formatDate(error.resetAt)}`);
+  } else if (error.resetAt !== undefined) {
+    lines.push(`Reported rate limit reset: ${formatDate(error.resetAt)}`);
+  }
+
+  if (error.retryAfterSeconds !== undefined) {
+    lines.push(
+      `GitHub requested a cooldown of ${error.retryAfterSeconds} seconds before retrying.`,
+    );
+  } else if (error.kind === "SECONDARY") {
+    lines.push(
+      "GitHub did not provide Retry-After.",
+      "Wait before resuming; GitHub recommends at least one minute for secondary rate limits when primary quota remains available.",
+    );
+  }
+
+  if (error.kind === "UNKNOWN") {
+    lines.push(`HTTP status: ${error.status}`);
+  }
+  return lines;
+}
+
 export function formatSuggestedResumeCommand(
   username: string,
   days: number,
@@ -188,6 +247,7 @@ export async function runCli(
           ? {}
           : { concurrency: options.concurrency }),
         historyYears,
+        ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
         completedRecentActivity: checkpointRecentResults(checkpoint),
         completedHistoricalActivity: checkpointHistoricalResults(checkpoint),
         ...(reusableRateLimit === undefined
@@ -278,13 +338,7 @@ export async function runCli(
 
     if (error instanceof GitHubRateLimitError) {
       if (progressSavedFor !== undefined) {
-        const lines = [
-          "GitHub GraphQL rate limit exhausted.",
-          "Progress saved.",
-        ];
-        if (error.details.resetAt) {
-          lines.push(`Resume after: ${formatDate(error.details.resetAt)}`);
-        }
+        const lines = formatRateLimitLines(error, "GraphQL", true);
         lines.push(
           "",
           "Run:",
@@ -297,19 +351,7 @@ export async function runCli(
         io.error(lines.join("\n"));
         return 1;
       }
-      const lines = [
-        "GitHub API rate limit reached or the request was temporarily restricted.",
-        "Using GITHUB_TOKEN significantly increases the available request quota.",
-      ];
-
-      if (error.details.resetAt) {
-        lines.push(`Rate limit reset: ${formatDate(error.details.resetAt)}.`);
-      }
-      if (error.details.retryAfterSeconds !== undefined) {
-        lines.push(`Retry after: ${error.details.retryAfterSeconds} seconds.`);
-      }
-
-      io.error(lines.join("\n"));
+      io.error(formatRateLimitLines(error, "API", false).join("\n"));
       return 1;
     }
 

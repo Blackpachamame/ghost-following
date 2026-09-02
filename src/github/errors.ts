@@ -5,6 +5,25 @@ export interface RateLimitDetails {
   retryAfterSeconds?: number;
 }
 
+export type RateLimitKind = "PRIMARY" | "SECONDARY" | "UNKNOWN";
+
+export function isExplicitSecondaryRateLimitMessage(message: string): boolean {
+  return /secondary[\s-]+rate.?limit|abuse[\s-]+detection/i.test(message);
+}
+
+export function isRateLimitLikeMessage(message: string): boolean {
+  return /rate.?limit/i.test(message) || isExplicitSecondaryRateLimitMessage(message);
+}
+
+export function classifyRateLimit(
+  details: RateLimitDetails,
+  safeMessages: readonly string[] = [],
+): RateLimitKind {
+  if (details.remaining === 0) return "PRIMARY";
+  if (safeMessages.some(isExplicitSecondaryRateLimitMessage)) return "SECONDARY";
+  return "UNKNOWN";
+}
+
 export class GitHubError extends Error {
   override readonly name: string = "GitHubError";
 }
@@ -28,11 +47,31 @@ export class GitHubUserNotFoundError extends GitHubError {
 export class GitHubRateLimitError extends GitHubError {
   override readonly name = "GitHubRateLimitError";
 
+  readonly kind: RateLimitKind;
+
   constructor(
     readonly details: RateLimitDetails,
     readonly status: number,
+    safeMessages: readonly string[] = [],
   ) {
     super("GitHub API rate limit reached or the request was temporarily restricted.");
+    this.kind = classifyRateLimit(details, safeMessages);
+  }
+
+  get remaining(): number | undefined {
+    return this.details.remaining;
+  }
+
+  get limit(): number | undefined {
+    return this.details.limit;
+  }
+
+  get resetAt(): Date | undefined {
+    return this.details.resetAt;
+  }
+
+  get retryAfterSeconds(): number | undefined {
+    return this.details.retryAfterSeconds;
   }
 }
 

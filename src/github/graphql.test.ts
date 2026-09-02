@@ -7,6 +7,7 @@ import {
   GitHubGraphQLFatalError,
   GitHubGraphQLResponseBodyError,
   GitHubHttpError,
+  GitHubRateLimitError,
 } from "./errors.js";
 import {
   ACCOUNT_ACTIVITY_QUERY,
@@ -116,6 +117,60 @@ describe("parseAccountActivityResponse", () => {
           period,
         ),
       GitHubAuthenticationError,
+    );
+  });
+
+  it("classifies a GraphQL HTTP 200 rate-limit error as PRIMARY at zero quota", () => {
+    assert.throws(
+      () =>
+        parseAccountActivityResponse(
+          {
+            data: {
+              rateLimit: {
+                cost: 1,
+                limit: 5000,
+                remaining: 0,
+                resetAt: "2026-08-22T01:00:00.000Z",
+              },
+            },
+            errors: [{ message: "API rate limit exceeded" }],
+          },
+          "octocat",
+          period,
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof GitHubRateLimitError);
+        assert.equal(error.kind, "PRIMARY");
+        assert.equal(error.remaining, 0);
+        return true;
+      },
+    );
+  });
+
+  it("classifies an explicit GraphQL HTTP 200 secondary message as SECONDARY", () => {
+    assert.throws(
+      () =>
+        parseAccountActivityResponse(
+          {
+            data: {
+              rateLimit: {
+                cost: 1,
+                limit: 5000,
+                remaining: 4864,
+                resetAt: "2026-08-22T01:00:00.000Z",
+              },
+            },
+            errors: [{ message: "Abuse detection mechanism triggered." }],
+          },
+          "octocat",
+          period,
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof GitHubRateLimitError);
+        assert.equal(error.kind, "SECONDARY");
+        assert.equal(error.remaining, 4864);
+        return true;
+      },
     );
   });
 });
@@ -269,6 +324,118 @@ describe("parseHistoricalActivityResponse", () => {
 });
 
 describe("GitHubGraphQLClient", () => {
+  it("preserves headers and never retries HTTP 200 primary or secondary rate limits", async () => {
+    const cases = [
+      {
+        message: "API rate limit exceeded",
+        remaining: 0,
+        expectedKind: "PRIMARY",
+        headers: {
+          "x-ratelimit-limit": "5000",
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-reset": "1787360400",
+        },
+      },
+      {
+        message: "You have exceeded a secondary rate limit.",
+        remaining: 4864,
+        expectedKind: "SECONDARY",
+        headers: {
+          "x-ratelimit-limit": "5000",
+          "x-ratelimit-remaining": "4864",
+          "retry-after": "60",
+        },
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      let requests = 0;
+      await assert.rejects(
+        new GitHubGraphQLClient({
+          token: "secret-test-placeholder",
+          fetch: (async () => {
+            requests += 1;
+            return new Response(
+              JSON.stringify({
+                data: {
+                  rateLimit: {
+                    cost: 1,
+                    limit: 5000,
+                    remaining: testCase.remaining,
+                    resetAt: "2026-08-22T01:00:00.000Z",
+                  },
+                },
+                errors: [{ message: testCase.message }],
+              }),
+              { status: 200, headers: testCase.headers },
+            );
+          }) as typeof fetch,
+          sleep: async () => {
+            throw new Error("sleep must not be called");
+          },
+        }).getAccountActivity("octocat", period),
+        (error: unknown) => {
+          assert.ok(error instanceof GitHubRateLimitError);
+          assert.equal(error.kind, testCase.expectedKind);
+          assert.equal(error.remaining, testCase.remaining);
+          assert.equal(error.limit, 5000);
+          assert.equal(
+            error.retryAfterSeconds,
+            testCase.expectedKind === "SECONDARY" ? 60 : undefined,
+          );
+          assert.doesNotMatch(
+            error.message,
+            /secret-test-placeholder|authorization|query|variables/i,
+          );
+          return true;
+        },
+      );
+      assert.equal(requests, 1);
+    }
+  });
+
+  it("classifies HTTP 403 secondary and HTTP 429 without evidence conservatively", async () => {
+    const cases = [
+      {
+        status: 403,
+        body: { message: "Secondary rate limit reached." },
+        expectedKind: "SECONDARY",
+      },
+      {
+        status: 429,
+        body: { message: "Request temporarily restricted." },
+        expectedKind: "UNKNOWN",
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      let requests = 0;
+      await assert.rejects(
+        new GitHubGraphQLClient({
+          token: "test",
+          fetch: (async () => {
+            requests += 1;
+            return new Response(JSON.stringify(testCase.body), {
+              status: testCase.status,
+              headers: {
+                "x-ratelimit-limit": "5000",
+                "x-ratelimit-remaining": "4864",
+              },
+            });
+          }) as typeof fetch,
+          sleep: async () => {
+            throw new Error("sleep must not be called");
+          },
+        }).getAccountActivity("octocat", period),
+        (error: unknown) => {
+          assert.ok(error instanceof GitHubRateLimitError);
+          assert.equal(error.kind, testCase.expectedKind);
+          return true;
+        },
+      );
+      assert.equal(requests, 1);
+    }
+  });
   it("retries invalid JSON with the exact same recent request and then succeeds", async () => {
     const requests: Array<{
       url: string;

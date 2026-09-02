@@ -19,6 +19,7 @@ import {
 import type { AccountActivityQueryResult } from "../github/graphql.js";
 import {
   analyzeFollowingActivity,
+  RECENT_BATCH_PACING_MS,
   type ActivityProvider,
 } from "./analyzer.js";
 
@@ -62,6 +63,7 @@ describe("productive recent batching", () => {
 
   it("partitions 25 eligible users as exact ordered batches 12 + 12 + 1", async () => {
     const calls: string[][] = [];
+    const delays: number[] = [];
     const provider: ActivityProvider = {
       async getAccountActivities(logins) {
         calls.push([...logins]);
@@ -73,13 +75,17 @@ describe("productive recent batching", () => {
       account(`user-${index}`, "User", index + 1),
     );
 
-    const analysis = await analyzeFollowingActivity(accounts, provider, period);
+    const analysis = await analyzeFollowingActivity(accounts, provider, period, {
+      sleep: async (delay) => void delays.push(delay),
+    });
 
     assert.deepEqual(calls, [
       accounts.slice(0, 12).map(({ login }) => login),
       accounts.slice(12, 24).map(({ login }) => login),
       accounts.slice(24).map(({ login }) => login),
     ]);
+    assert.deepEqual(delays, [1_000, 1_000]);
+    assert.equal(RECENT_BATCH_PACING_MS, 1_000);
     assert.equal(analysis.counts.ACTIVE, 25);
     assert.equal(analysis.counts.UNKNOWN, 0);
   });
@@ -87,12 +93,16 @@ describe("productive recent batching", () => {
   for (const [count, expected] of [[12, [12]], [13, [12, 1]], [11, [11]]] as const) {
     it(`uses normal productive chunks ${expected.join(" + ")} for ${count} users`, async () => {
       const calls: number[] = [];
+      const delays: number[] = [];
       const values = Array.from({ length: count }, (_, index) => account(`boundary-${index}`, "User", index + 1));
       const analysis = await analyzeFollowingActivity(values, {
         async getAccountActivities(logins) { calls.push(logins.length); return batchSuccess(logins); },
         getHistoricalActivity: historicalNeverCalled,
-      }, period);
+      }, period, {
+        sleep: async (delay) => void delays.push(delay),
+      });
       assert.deepEqual(calls, expected);
+      assert.deepEqual(delays, count === 13 ? [1_000] : []);
       assert.equal(analysis.counts.ACTIVE, count);
     });
   }
@@ -195,6 +205,7 @@ describe("productive recent batching", () => {
 
   it("returns to the production batch size after recovering one HTTP timeout batch", async () => {
     const calls: number[] = [];
+    const delays: number[] = [];
     const provider: ActivityProvider = {
       async getAccountActivities(logins) {
         calls.push(logins.length);
@@ -209,9 +220,12 @@ describe("productive recent batching", () => {
       account(`fixed-batch-${index}`, "User", index + 1),
     );
 
-    const analysis = await analyzeFollowingActivity(accounts, provider, period);
+    const analysis = await analyzeFollowingActivity(accounts, provider, period, {
+      sleep: async (delay) => void delays.push(delay),
+    });
 
     assert.deepEqual(calls, [12, 6, 6, 12, 12]);
+    assert.deepEqual(delays, [1_000, 1_000]);
     assert.equal(analysis.counts.ACTIVE, 36);
   });
 
@@ -309,7 +323,7 @@ describe("productive recent batching", () => {
     const original = new GitHubHttpError(503, "Service Unavailable", undefined, 3);
     const calls: string[][] = [];
     const diagnosed: number[] = [];
-    const accounts = Array.from({ length: 12 }, (_, index) =>
+    const accounts = Array.from({ length: 13 }, (_, index) =>
       account(`unavailable-${index}`, "User", index + 1),
     );
     const provider: ActivityProvider = {
@@ -322,6 +336,9 @@ describe("productive recent batching", () => {
 
     await assert.rejects(
       analyzeFollowingActivity(accounts, provider, period, {
+        sleep: async () => {
+          throw new Error("pacing sleep must not be called");
+        },
         onRecentBatchFailed(failure) {
           diagnosed.push(failure.logins.length);
         },
@@ -360,6 +377,9 @@ describe("productive recent batching", () => {
           provider,
           period,
           {
+            sleep: async () => {
+              throw new Error("pacing sleep must not be called");
+            },
             onRecentBatchFailed() {
               diagnosed = true;
             },
@@ -370,6 +390,140 @@ describe("productive recent batching", () => {
       assert.equal(calls, 1);
       assert.equal(diagnosed, false);
     }
+  });
+
+  it("paces once after a fully resolved fallback group, never between its branches", async () => {
+    const events: string[] = [];
+    const accounts = Array.from({ length: 13 }, (_, index) =>
+      account(`paced-fallback-${index}`, "User", index + 1),
+    );
+    const provider: ActivityProvider = {
+      async getAccountActivities(logins) {
+        events.push(`request:${logins.length}`);
+        if (logins.length === 12) {
+          throw new GitHubHttpError(502, "", undefined, 3);
+        }
+        return batchSuccess(logins);
+      },
+      getHistoricalActivity: historicalNeverCalled,
+    };
+
+    await analyzeFollowingActivity(accounts, provider, period, {
+      sleep: async (delay) => void events.push(`pace:${delay}`),
+    });
+
+    assert.deepEqual(events, [
+      "request:12",
+      "request:6",
+      "request:6",
+      "pace:1000",
+      "request:1",
+    ]);
+  });
+
+  it("does not pace after a rate limit aborts the first top-level group", async () => {
+    const fatal = new GitHubRateLimitError(
+      { limit: 5000, remaining: 4864 },
+      403,
+      ["Secondary rate limit reached."],
+    );
+    const delays: number[] = [];
+    const accounts = Array.from({ length: 13 }, (_, index) =>
+      account(`rate-abort-${index}`, "User", index + 1),
+    );
+
+    await assert.rejects(
+      analyzeFollowingActivity(
+        accounts,
+        {
+          async getAccountActivities() {
+            throw fatal;
+          },
+          getHistoricalActivity: historicalNeverCalled,
+        },
+        period,
+        { sleep: async (delay) => void delays.push(delay) },
+      ),
+      (error) => error === fatal,
+    );
+
+    assert.deepEqual(delays, []);
+  });
+
+  it("applies normal pacing to pending resume groups in original order", async () => {
+    const accounts = Array.from({ length: 27 }, (_, index) =>
+      account(`resume-paced-${index}`, "User", index + 1),
+    );
+    const completed = accounts.slice(0, 2).map((value) => ({
+      account: value,
+      activity: queryResult(value.login, 1).activity,
+      status: "ACTIVE" as const,
+    }));
+    const calls: string[][] = [];
+    const delays: number[] = [];
+
+    const analysis = await analyzeFollowingActivity(
+      accounts,
+      {
+        async getAccountActivities(logins) {
+          calls.push([...logins]);
+          return batchSuccess(logins);
+        },
+        getHistoricalActivity: historicalNeverCalled,
+      },
+      period,
+      {
+        completedRecentActivity: completed,
+        sleep: async (delay) => void delays.push(delay),
+      },
+    );
+
+    assert.deepEqual(calls, [
+      accounts.slice(2, 14).map(({ login }) => login),
+      accounts.slice(14, 26).map(({ login }) => login),
+      accounts.slice(26).map(({ login }) => login),
+    ]);
+    assert.deepEqual(delays, [1_000, 1_000]);
+    assert.deepEqual(
+      analysis.results.map(({ account: value }) => value.login),
+      accounts.map(({ login }) => login),
+    );
+  });
+
+  it("does not add pacing sleeps between historical jobs", async () => {
+    const accounts = Array.from({ length: 13 }, (_, index) =>
+      account(`historical-paced-${index}`, "User", index + 1),
+    );
+    const delays: number[] = [];
+    let historicalCalls = 0;
+
+    await analyzeFollowingActivity(
+      accounts,
+      {
+        async getAccountActivities(logins) {
+          return {
+            items: logins.map((login) => ({
+              login,
+              status: "SUCCESS" as const,
+              activity: queryResult(login, 0).activity,
+            })),
+            rateLimit: rateLimit(4900),
+          };
+        },
+        async getHistoricalActivity() {
+          historicalCalls += 1;
+          return { lastVisibleActivityAt: null, rateLimit: rateLimit(4800) };
+        },
+      },
+      period,
+      {
+        historyYears: 1,
+        sleep: async (delay) => void delays.push(delay),
+      },
+    );
+
+    assert.equal(historicalCalls, 13);
+    assert.deepEqual(delays, [1_000]);
   });
 
   it("composes RESOURCE_LIMIT splitting followed by HTTP timeout splitting", async () => {

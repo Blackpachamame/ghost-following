@@ -47,7 +47,10 @@ export function readRateLimit(headers: Headers): RateLimitSnapshot {
 
   if (limit !== undefined) result.limit = limit;
   if (remaining !== undefined) result.remaining = remaining;
-  if (resetSeconds !== undefined) result.resetAt = new Date(resetSeconds * 1_000);
+  if (resetSeconds !== undefined) {
+    const resetAt = new Date(resetSeconds * 1_000);
+    if (!Number.isNaN(resetAt.getTime())) result.resetAt = resetAt;
+  }
   if (retryAfterSeconds !== undefined) result.retryAfterSeconds = retryAfterSeconds;
 
   return result;
@@ -135,7 +138,12 @@ export class GitHubClient {
     }
 
     if (response.status === 403 || response.status === 429) {
-      throw new GitHubRateLimitError(rateLimit, response.status);
+      const apiMessage = await readApiMessage(response);
+      throw new GitHubRateLimitError(
+        rateLimit,
+        response.status,
+        apiMessage === undefined ? [] : [apiMessage],
+      );
     }
 
     if (!response.ok) {

@@ -13,6 +13,7 @@ import {
   GitHubHttpError,
   GitHubNetworkError,
   GitHubRateLimitError,
+  isRateLimitLikeMessage,
   type RateLimitDetails,
 } from "./errors.js";
 import {
@@ -194,6 +195,30 @@ function parseErrors(value: unknown): ParsedGraphQLError[] {
   });
 }
 
+function graphQLRateLimitError(
+  payload: unknown,
+  headerDetails: RateLimitDetails,
+  status: number,
+): GitHubRateLimitError | undefined {
+  if (!isRecord(payload)) return undefined;
+  const errors = parseErrors(payload.errors);
+  const messages = errors.map(({ message }) => message);
+  const data = isRecord(payload.data) ? payload.data : undefined;
+  const graphQLDetails = tryParseRateLimit(data?.rateLimit);
+  const details = { ...(graphQLDetails ?? {}), ...headerDetails };
+  if (
+    errors.length === 0 ||
+    (details.remaining !== 0 && !messages.some(isRateLimitLikeMessage))
+  ) {
+    return undefined;
+  }
+  return new GitHubRateLimitError(
+    details,
+    status,
+    messages,
+  );
+}
+
 function toRateLimitDetails(
   rateLimit: GraphQLRateLimit | undefined,
 ): (RateLimitDetails & { cost?: number }) | undefined {
@@ -217,8 +242,16 @@ export function parseAccountActivityResponse(
   const errors = parseErrors(payload.errors);
   const combinedErrorMessage = errors.map(({ message }) => message).join("; ");
 
-  if (errors.some(({ message }) => /rate.?limit/i.test(message))) {
-    throw new GitHubRateLimitError(rateLimit ?? {}, 200);
+  if (
+    errors.length > 0 &&
+    (rateLimit?.remaining === 0 ||
+      errors.some(({ message }) => isRateLimitLikeMessage(message)))
+  ) {
+    throw new GitHubRateLimitError(
+      rateLimit ?? {},
+      200,
+      errors.map(({ message }) => message),
+    );
   }
 
   if (
@@ -414,8 +447,16 @@ export function parseHistoricalActivityResponse(
   const errors = parseErrors(payload.errors);
   const combinedErrorMessage = errors.map(({ message }) => message).join("; ");
 
-  if (errors.some(({ message }) => /rate.?limit/i.test(message))) {
-    throw new GitHubRateLimitError(rateLimit ?? {}, 200);
+  if (
+    errors.length > 0 &&
+    (rateLimit?.remaining === 0 ||
+      errors.some(({ message }) => isRateLimitLikeMessage(message)))
+  ) {
+    throw new GitHubRateLimitError(
+      rateLimit ?? {},
+      200,
+      errors.map(({ message }) => message),
+    );
   }
   if (
     errors.some(({ message }) =>
@@ -631,13 +672,21 @@ export class GitHubGraphQLClient {
       throw new GitHubAuthenticationError();
     }
 
-    if (
-      response.status === 429 ||
-      (response.status === 403 &&
-        (headerRateLimit.remaining === 0 ||
-          headerRateLimit.retryAfterSeconds !== undefined))
-    ) {
-      throw new GitHubRateLimitError(headerRateLimit, response.status);
+    if (response.status === 403 || response.status === 429) {
+      const apiMessage = await readApiMessage(response);
+      const safeMessages = apiMessage === undefined ? [] : [apiMessage];
+      if (
+        response.status === 429 ||
+        headerRateLimit.remaining === 0 ||
+        headerRateLimit.retryAfterSeconds !== undefined ||
+        safeMessages.some(isRateLimitLikeMessage)
+      ) {
+        throw new GitHubRateLimitError(
+          headerRateLimit,
+          response.status,
+          safeMessages,
+        );
+      }
     }
 
     if (response.status === 403) {
@@ -660,6 +709,13 @@ export class GitHubGraphQLClient {
         "GitHub GraphQL response body was not processed.",
       );
     }
+
+    const rateLimitError = graphQLRateLimitError(
+      processed.payload,
+      headerRateLimit,
+      response.status,
+    );
+    if (rateLimitError !== undefined) throw rateLimitError;
 
     return processed.payload;
   }

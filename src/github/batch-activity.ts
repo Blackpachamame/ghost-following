@@ -6,6 +6,7 @@ import {
   GitHubAuthenticationError,
   GitHubGraphQLFatalError,
   GitHubRateLimitError,
+  isRateLimitLikeMessage,
 } from "./errors.js";
 import type { GraphQLRateLimit } from "./graphql.js";
 
@@ -108,7 +109,7 @@ export function isResourceLimitMessage(message: string): boolean {
 }
 
 function isRateLimitMessage(message: string): boolean {
-  return /rate.?limit/i.test(message) && !isResourceLimitMessage(message);
+  return isRateLimitLikeMessage(message) && !isResourceLimitMessage(message);
 }
 
 function isAuthenticationMessage(message: string): boolean {
@@ -244,8 +245,11 @@ export function parseAccountActivityBatchResponse(
   const errors = parseErrors(payload.errors);
   const messages = errors.map(({ message }) => message);
 
-  if (messages.some(isRateLimitMessage)) {
-    throw new GitHubRateLimitError(rateLimit ?? {}, 200);
+  if (
+    errors.length > 0 &&
+    (rateLimit?.remaining === 0 || messages.some(isRateLimitMessage))
+  ) {
+    throw new GitHubRateLimitError(rateLimit ?? {}, 200, messages);
   }
   if (messages.some(isAuthenticationMessage)) {
     throw new GitHubAuthenticationError(

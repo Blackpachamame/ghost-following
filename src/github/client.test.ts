@@ -34,6 +34,18 @@ describe("readRateLimit", () => {
     assert.equal(details.resetAt?.toISOString(), "1970-01-01T00:00:02.000Z");
     assert.equal(details.retryAfterSeconds, 30);
   });
+
+  it("ignores malformed Retry-After and reset headers", () => {
+    const details = readRateLimit(
+      new Headers({
+        "retry-after": "nonsense",
+        "x-ratelimit-reset": "9007199254740991",
+      }),
+    );
+
+    assert.equal(details.retryAfterSeconds, undefined);
+    assert.equal(details.resetAt, undefined);
+  });
 });
 
 describe("GitHubClient", () => {
@@ -162,11 +174,84 @@ describe("GitHubClient", () => {
       new GitHubClient({ fetch: fetchMock }).getPage("https://example.test", "octocat"),
       (error: unknown) => {
         assert.ok(error instanceof GitHubRateLimitError);
+        assert.equal(error.kind, "PRIMARY");
+        assert.equal(error.limit, 60);
         assert.equal(error.details.remaining, 0);
         assert.equal(error.details.retryAfterSeconds, 30);
+        assert.equal(error.resetAt?.toISOString(), "1970-01-01T00:00:02.000Z");
         return true;
       },
     );
+  });
+
+  it("classifies only an explicit secondary message as SECONDARY", async () => {
+    for (const retryAfter of ["60", undefined] as const) {
+      let requests = 0;
+      const headers: Record<string, string> = {
+        "x-ratelimit-limit": "5000",
+        "x-ratelimit-remaining": "4864",
+      };
+      if (retryAfter !== undefined) headers["retry-after"] = retryAfter;
+      const fetchMock = (async () => {
+        requests += 1;
+        return new Response(
+          '{"message":"You have exceeded a SeCoNdArY rate limit. Please wait."}',
+          { status: 403, headers },
+        );
+      }) as typeof fetch;
+
+      await assert.rejects(
+        new GitHubClient({
+          fetch: fetchMock,
+          sleep: async () => {
+            throw new Error("sleep must not be called");
+          },
+        }).getPage("https://example.test", "octocat"),
+        (error: unknown) => {
+          assert.ok(error instanceof GitHubRateLimitError);
+          assert.equal(error.kind, "SECONDARY");
+          assert.equal(error.remaining, 4864);
+          assert.equal(error.limit, 5000);
+          assert.equal(
+            error.retryAfterSeconds,
+            retryAfter === undefined ? undefined : 60,
+          );
+          return true;
+        },
+      );
+      assert.equal(requests, 1);
+    }
+  });
+
+  it("keeps an unclassified rate-limit-like response UNKNOWN", async () => {
+    let requests = 0;
+    const fetchMock = (async () => {
+      requests += 1;
+      return new Response('{"message":"API rate limit exceeded"}', {
+        status: 429,
+        headers: {
+          "x-ratelimit-limit": "5000",
+          "x-ratelimit-remaining": "4864",
+          "retry-after": "nonsense",
+        },
+      });
+    }) as typeof fetch;
+
+    await assert.rejects(
+      new GitHubClient({
+        fetch: fetchMock,
+        sleep: async () => {
+          throw new Error("sleep must not be called");
+        },
+      }).getPage("https://example.test", "octocat"),
+      (error: unknown) => {
+        assert.ok(error instanceof GitHubRateLimitError);
+        assert.equal(error.kind, "UNKNOWN");
+        assert.equal(error.retryAfterSeconds, undefined);
+        return true;
+      },
+    );
+    assert.equal(requests, 1);
   });
 
   it("rejects an unexpected successful payload", async () => {

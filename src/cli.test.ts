@@ -781,21 +781,23 @@ describe("CLI options", () => {
       const exitCode = await runCli(
         ["octocat", "--days", "180", "--history-years", "3"],
         {
-        token: "obvious-test-placeholder",
-        fetch: fetchMock,
-        checkpointRoot: root,
-        now: new Date("2026-08-24T00:00:00.000Z"),
-        io: {
-          log: (message) => logs.push(message),
-          error: (message) => errors.push(message),
-        },
+          token: "obvious-test-placeholder",
+          fetch: fetchMock,
+          checkpointRoot: root,
+          now: new Date("2026-08-24T00:00:00.000Z"),
+          sleep: async () => undefined,
+          io: {
+            log: (message) => logs.push(message),
+            error: (message) => errors.push(message),
+          },
         },
       );
 
       assert.equal(exitCode, 1);
       assert.equal(graphQLRequests, 1);
       assert.deepEqual(logs, ["Analyzing recent activity: 12 / 26"]);
-      assert.match(errors[0] ?? "", /GitHub GraphQL rate limit exhausted/);
+      assert.match(errors[0] ?? "", /GitHub GraphQL primary rate limit exhausted/);
+      assert.doesNotMatch(errors[0] ?? "", /secondary rate limit/);
       assert.match(errors[0] ?? "", /Progress saved/);
       assert.match(errors[0] ?? "", new RegExp(resetAt));
       assert.match(
@@ -807,6 +809,203 @@ describe("CLI options", () => {
       };
       assert.equal(Object.keys(saved.completedRecentActivity).length, 12);
       assert.doesNotMatch(await readFile(path, "utf8"), /obvious-test-placeholder/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps retry backoff and top-level pacing independent before a secondary limit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ghost-following-secondary-limit-"));
+    const path = checkpointPathFor("octocat", root);
+    const following = Array.from({ length: 13 }, (_, index) => ({
+      login: `secondary-${index}`,
+      id: index + 1,
+      type: "User",
+      html_url: `https://github.com/secondary-${index}`,
+    }));
+    let graphQLRequests = 0;
+    const delays: number[] = [];
+    const sleepAfterRequests: number[] = [];
+    const fetchMock = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      if (String(input).includes("/following")) {
+        return new Response(JSON.stringify(following), { status: 200 });
+      }
+      graphQLRequests += 1;
+      if (graphQLRequests === 1) {
+        return new Response("", { status: 504 });
+      }
+      if (graphQLRequests === 3) {
+        return new Response(
+          JSON.stringify({
+            message:
+              "You have exceeded a secondary rate limit. Authorization: secret-body",
+          }),
+          {
+            status: 403,
+            headers: {
+              "x-ratelimit-limit": "5000",
+              "x-ratelimit-remaining": "4864",
+              "retry-after": "60",
+            },
+          },
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as {
+        variables: Record<string, string>;
+      };
+      const data: Record<string, unknown> = {
+        rateLimit: {
+          cost: 1,
+          limit: 5000,
+          remaining: 4864,
+          resetAt: "2026-08-24T01:00:00.000Z",
+        },
+      };
+      for (let index = 0; index < 12; index += 1) {
+        const login = body.variables[`login${index}`]!;
+        data[`u${index}`] = {
+          login,
+          contributionsCollection: {
+            startedAt: "2025-08-24T00:00:00.000Z",
+            endedAt: "2026-08-24T00:00:00.000Z",
+            hasAnyContributions: true,
+            hasAnyRestrictedContributions: false,
+            hasActivityInThePast: false,
+            restrictedContributionsCount: 0,
+            totalCommitContributions: 1,
+            totalIssueContributions: 0,
+            totalPullRequestContributions: 0,
+            totalPullRequestReviewContributions: 0,
+            contributionCalendar: { totalContributions: 1 },
+          },
+        };
+      }
+      return new Response(JSON.stringify({ data }), { status: 200 });
+    }) as typeof fetch;
+    const errors: string[] = [];
+
+    try {
+      const exitCode = await runCli(["octocat", "--days", "365"], {
+        token: "top-secret-token",
+        fetch: fetchMock,
+        checkpointRoot: root,
+        now: new Date("2026-08-24T00:00:00.000Z"),
+        sleep: async (delay) => {
+          delays.push(delay);
+          sleepAfterRequests.push(graphQLRequests);
+        },
+        io: { log() {}, error: (message) => errors.push(message) },
+      });
+
+      assert.equal(exitCode, 1);
+      assert.equal(graphQLRequests, 3);
+      assert.deepEqual(delays, [1_000, 1_000]);
+      assert.deepEqual(sleepAfterRequests, [1, 2]);
+      assert.match(errors[0] ?? "", /GitHub GraphQL secondary rate limit reached/);
+      assert.match(errors[0] ?? "", /cooldown of 60 seconds/);
+      assert.match(errors[0] ?? "", /Primary GraphQL quota remaining: 4864 \/ 5000/);
+      assert.match(errors[0] ?? "", /Progress saved/);
+      assert.match(
+        errors[0] ?? "",
+        /npm run start -- octocat --days 365 --resume/,
+      );
+      assert.doesNotMatch(
+        errors[0] ?? "",
+        /primary rate limit exhausted|top-secret-token|secret-body|Authorization/i,
+      );
+      const serialized = await readFile(path, "utf8");
+      const saved = JSON.parse(serialized) as {
+        completedRecentActivity: Record<string, unknown>;
+      };
+      assert.equal(Object.keys(saved.completedRecentActivity).length, 12);
+      assert.doesNotMatch(serialized, /top-secret-token|secret-body|Authorization/i);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an unclassified REST rate limit without inventing primary or secondary", async () => {
+    const errors: string[] = [];
+    let requests = 0;
+    const exitCode = await runCli(["octocat"], {
+      token: "unknown-secret-token",
+      fetch: (async () => {
+        requests += 1;
+        return new Response('{"message":"Request temporarily restricted."}', {
+          status: 429,
+          headers: {
+            "x-ratelimit-limit": "5000",
+            "x-ratelimit-remaining": "4864",
+          },
+        });
+      }) as typeof fetch,
+      sleep: async () => {
+        throw new Error("sleep must not be called");
+      },
+      io: { log() {}, error: (message) => errors.push(message) },
+    });
+
+    assert.equal(exitCode, 1);
+    assert.equal(requests, 1);
+    assert.match(errors[0] ?? "", /GitHub API rate limit encountered/);
+    assert.match(errors[0] ?? "", /did not provide enough information/);
+    assert.match(errors[0] ?? "", /Primary API quota remaining: 4864 \/ 5000/);
+    assert.doesNotMatch(
+      errors[0] ?? "",
+      /primary rate limit exhausted|secondary rate limit reached|unknown-secret-token/i,
+    );
+  });
+
+  it("reports the manual secondary wait guidance when Retry-After is absent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ghost-following-secondary-wait-"));
+    const errors: string[] = [];
+    let requests = 0;
+
+    try {
+      const exitCode = await runCli(["octocat", "--days", "365"], {
+        token: "test-placeholder",
+        checkpointRoot: root,
+        fetch: (async (input: string | URL | Request) => {
+          requests += 1;
+          if (String(input).includes("/following")) {
+            return new Response(
+              JSON.stringify([
+                {
+                  login: "secondary-wait",
+                  id: 1,
+                  type: "User",
+                  html_url: "https://github.com/secondary-wait",
+                },
+              ]),
+              { status: 200 },
+            );
+          }
+          return new Response(
+            '{"message":"Secondary rate limit reached."}',
+            {
+              status: 403,
+              headers: {
+                "x-ratelimit-limit": "5000",
+                "x-ratelimit-remaining": "4800",
+              },
+            },
+          );
+        }) as typeof fetch,
+        sleep: async () => {
+          throw new Error("sleep must not be called");
+        },
+        io: { log() {}, error: (message) => errors.push(message) },
+      });
+
+      assert.equal(exitCode, 1);
+      assert.equal(requests, 2);
+      assert.match(errors[0] ?? "", /GitHub did not provide Retry-After/);
+      assert.match(errors[0] ?? "", /at least one minute/);
+      assert.match(errors[0] ?? "", /Progress saved/);
+      await access(checkpointPathFor("octocat", root));
     } finally {
       await rm(root, { recursive: true, force: true });
     }

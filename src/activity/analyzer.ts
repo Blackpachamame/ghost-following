@@ -18,8 +18,10 @@ import {
   GitHubRateLimitError,
 } from "../github/errors.js";
 import {
+  defaultSleep,
   TRANSIENT_HTTP_STATUSES,
   TRANSIENT_MAX_ATTEMPTS,
+  type Sleep,
 } from "../github/retry.js";
 import type {
   AccountActivityQueryResult,
@@ -31,6 +33,7 @@ import { mapWithConcurrency } from "../utils/concurrency.js";
 
 export const DEFAULT_GRAPHQL_CONCURRENCY = 4;
 export const ACTIVITY_BATCH_SIZE = 12;
+export const RECENT_BATCH_PACING_MS = 1_000;
 
 export interface RecentBatchHttpFailure {
   logins: readonly string[];
@@ -81,6 +84,7 @@ export interface ActivityProvider {
 export interface ActivityAnalysisOptions {
   concurrency?: number;
   historyYears?: number;
+  sleep?: Sleep;
   initialRateLimit?: GraphQLRateLimit;
   completedRecentActivity?: readonly AccountActivityResult[];
   completedHistoricalActivity?: readonly AccountActivityResult[];
@@ -512,6 +516,7 @@ export async function analyzeFollowingActivity(
       : optionsOrConcurrency;
   const concurrency = options.concurrency ?? DEFAULT_GRAPHQL_CONCURRENCY;
   const historyYears = options.historyYears ?? 0;
+  const sleep = options.sleep ?? defaultSleep;
   if (
     !Number.isSafeInteger(historyYears) ||
     historyYears < 0 ||
@@ -552,7 +557,8 @@ export async function analyzeFollowingActivity(
     );
   };
 
-  for (const batch of chunkValues(pendingRecent, ACTIVITY_BATCH_SIZE)) {
+  const recentBatches = chunkValues(pendingRecent, ACTIVITY_BATCH_SIZE);
+  for (const [index, batch] of recentBatches.entries()) {
     const resolved = await resolveBatchWithFallback(
       batch,
       client,
@@ -565,6 +571,10 @@ export async function analyzeFollowingActivity(
       latestRateLimit,
       resolved.rateLimit,
     ]);
+    if (index < recentBatches.length - 1) {
+      ensureQuota(latestRateLimit);
+      await sleep(RECENT_BATCH_PACING_MS);
+    }
   }
 
   const recentResults = eligibleAccounts.map((account) => {

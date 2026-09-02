@@ -268,6 +268,8 @@ El análisis reciente agrupa hasta 12 usuarios por request GraphQL mediante alia
 
 Este default se redujo a partir de benchmarks controlados que mostraron mejor confiabilidad y throughput observado con la query actual. No es un máximo garantizado por GitHub. Si GitHub rechaza aliases concretos con `RESOURCE_LIMIT`, la CLI conserva los aliases utilizables y divide únicamente los fallidos en mitades hasta resolverlos. Por ejemplo, 12 se divide en 6 + 6.
 
+Entre batches recent normales de nivel superior, la CLI agrega una pausa secuencial conservadora de un segundo para reducir la presión GraphQL sostenida. No espera antes del primero ni después del último, y tampoco inserta esa pausa entre ramas internas de fallback. Esta mitigación no garantiza que GitHub nunca active límites secundarios.
+
 Un batch que agota los tres intentos con HTTP 502 o 504 también se divide secuencialmente por mitades. La reducción afecta sólo a ese grupo y puede repetirse dentro de la rama; el siguiente batch normal vuelve a ser de 12. Un singleton que vuelve a agotar 502/504 termina como `UNKNOWN`, se guarda como completado y no pasa al lookup histórico.
 
 HTTP 503 no activa esta reducción y sigue siendo fatal. Tampoco la activan autenticación, 401, 403, 429, rate limits, errores de transporte agotados, parsing, schema u otros HTTP.
@@ -306,7 +308,7 @@ Cada request REST o GraphQL que recibe HTTP 502, 503 o 504 se reintenta hasta un
 
 Para GraphQL, esos tres intentos forman un único presupuesto compartido entre HTTP transitorio, transporte, fallos clasificados durante la lectura del body y JSON sintácticamente inválido. Cada intento reutiliza exactamente la misma query, variables y body serializado, tanto en recent como en historical. Un JSON válido que no cumple el schema esperado sigue siendo fatal sin retry. Si el JSON inválido agota los tres intentos, el audit termina con error y puede continuarse mediante `--resume`; nunca se guarda ni imprime el body recibido.
 
-Esta política no se aplica a 401, 403 ni 429. Tampoco reemplaza el fallback binario de los resource limits GraphQL; ambos mecanismos pueden componerse dentro del mismo árbol sin volver a consultar aliases ya resueltos.
+Esta política no se aplica a 401, 403 ni 429. Los rate limits primary, secondary o no clasificables tampoco se reintentan automáticamente. Tampoco reemplaza el fallback binario de los resource limits GraphQL; ambos mecanismos pueden componerse dentro del mismo árbol sin volver a consultar aliases ya resueltos.
 
 Si un batch reciente agota los tres intentos con HTTP 502 o 504, muestra los logins exactos y reduce sólo ese batch. HTTP 503 sigue terminando la auditoría con error sin dividir. Cada request exacto que agota 502, 503 o 504 agrega una línea JSON independiente, incluso para una rama anidada o un singleton recuperado, en:
 
@@ -322,7 +324,9 @@ El coste GraphQL no se presupone; se muestra el último coste observado que GitH
 
 La misma query devuelve `cost`, `limit`, `remaining` y `resetAt`; no se realiza una request adicional para consultar la cuota.
 
-GitHub aplica rate limits independientes a REST y GraphQL. El batching reduce drásticamente las requests recientes, pero el lookup histórico sigue siendo individual y puede consumir una parte importante de la cuota. Cuando GraphQL informa cuota cero, la CLI guarda el progreso, muestra `resetAt`, termina con código no-cero y ofrece el comando `--resume`. No espera automáticamente hasta el reset.
+GitHub aplica rate limits independientes a REST y GraphQL. La CLI clasifica un primary GraphQL rate limit cuando la respuesta observada informa que la cuota primaria llegó a cero. Sólo clasifica un secondary GraphQL rate limit cuando el mensaje seguro de GitHub lo indica explícitamente —incluida abuse detection—; puede ocurrir aunque todavía queden puntos primarios. Una respuesta rate-limit-like sin evidencia suficiente se informa sin inventar una clasificación.
+
+En cualquiera de esos casos la CLI conserva el checkpoint, termina con código no-cero y ofrece el comando `--resume`. Muestra `resetAt`, `Retry-After` y cuota primaria cuando están disponibles, pero no hace una request adicional para consultar cuota ni auto-espera cooldowns largos: la reanudación es manual.
 
 ## Troubleshooting de un batch recent
 
