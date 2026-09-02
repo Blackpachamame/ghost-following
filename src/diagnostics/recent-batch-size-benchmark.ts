@@ -6,12 +6,14 @@ import type { Sleep } from "../github/retry.js";
 import { chunkValues } from "../utils/chunks.js";
 import { isProbeHaltingOutcome, isProcessingFailure } from "./recent-composition-probe.js";
 import { executeRecentQueryMeasurement, type RecentQueryOutcome } from "./recent-query-comparison.js";
+import { MAX_SUPPORTED_DIAGNOSTIC_BATCH_SIZE } from "./recent-diagnostic-limits.js";
 
 export const DEFAULT_BENCHMARK_DAYS = 365;
 export const DEFAULT_BENCHMARK_SAMPLE_SIZE = 200;
 export const MIN_BENCHMARK_SAMPLE_SIZE = 50;
 export const MAX_BENCHMARK_SAMPLE_SIZE = 500;
 export const DEFAULT_BENCHMARK_SIZES = [6, 8, 10, 12, 15, 25] as const;
+export const MAX_BENCHMARK_BATCH_SIZE = MAX_SUPPORTED_DIAGNOSTIC_BATCH_SIZE;
 export const BENCHMARK_SAMPLING_METHOD = "sha256-login" as const;
 
 export interface PreparedBatchSizeBenchmark {
@@ -127,8 +129,8 @@ export function validateBenchmarkSizes(sizes: readonly number[]): number[] {
   if (sizes.length === 0) throw new RangeError("At least one batch size is required.");
   const seen = new Set<number>();
   for (const size of sizes) {
-    if (!Number.isSafeInteger(size) || size < 1 || size > ACTIVITY_BATCH_SIZE) {
-      throw new RangeError(`Batch sizes must be unique integers from 1 to ${ACTIVITY_BATCH_SIZE}.`);
+    if (!Number.isSafeInteger(size) || size < 1 || size > MAX_BENCHMARK_BATCH_SIZE) {
+      throw new RangeError(`Batch sizes must be unique integers from 1 to ${MAX_BENCHMARK_BATCH_SIZE}.`);
     }
     if (seen.has(size)) throw new RangeError("Batch sizes must be unique.");
     seen.add(size);

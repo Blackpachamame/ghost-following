@@ -260,19 +260,19 @@ Los candidatos se ordenan por `NOT_REQUESTED`, `NOT_FOUND_IN_LOOKBACK`, `FAILED`
 
 ## Cuentas grandes y batching
 
-El análisis reciente agrupa hasta 25 usuarios por request GraphQL mediante aliases y variables seguras:
+El análisis reciente agrupa hasta 12 usuarios por request GraphQL mediante aliases y variables seguras:
 
 ```text
-25 = production default
+12 = production default
 ```
 
-Este tamaño se eligió empíricamente. No es un máximo garantizado por GitHub: pruebas internas con esta query observaron resource limits en tamaños mayores. Si GitHub rechaza aliases concretos con `RESOURCE_LIMIT`, la CLI conserva los aliases utilizables y divide únicamente los fallidos en mitades hasta resolverlos. Por ejemplo, 25 se divide en 12 + 13.
+Este default se redujo a partir de benchmarks controlados que mostraron mejor confiabilidad y throughput observado con la query actual. No es un máximo garantizado por GitHub. Si GitHub rechaza aliases concretos con `RESOURCE_LIMIT`, la CLI conserva los aliases utilizables y divide únicamente los fallidos en mitades hasta resolverlos. Por ejemplo, 12 se divide en 6 + 6.
 
-Un batch que agota los tres intentos con HTTP 502 o 504 también se divide secuencialmente por mitades. La reducción afecta sólo a ese grupo y puede repetirse dentro de la rama; el siguiente batch normal vuelve a ser de 25. Un singleton que vuelve a agotar 502/504 termina como `UNKNOWN`, se guarda como completado y no pasa al lookup histórico.
+Un batch que agota los tres intentos con HTTP 502 o 504 también se divide secuencialmente por mitades. La reducción afecta sólo a ese grupo y puede repetirse dentro de la rama; el siguiente batch normal vuelve a ser de 12. Un singleton que vuelve a agotar 502/504 termina como `UNKNOWN`, se guarda como completado y no pasa al lookup histórico.
 
 HTTP 503 no activa esta reducción y sigue siendo fatal. Tampoco la activan autenticación, 401, 403, 429, rate limits, errores de transporte agotados, parsing, schema u otros HTTP.
 
-Para 5.000 usuarios elegibles, el barrido reciente requiere aproximadamente 200 requests si todos los batches de 25 funcionan. Es una estimación, no una garantía: fallbacks, cambios de GitHub y errores parciales pueden aumentar el número.
+Para 5.000 usuarios elegibles, el barrido reciente requiere aproximadamente 417 requests iniciales si todos los batches de 12 funcionan al primer intento. Es una estimación, no una garantía: retries, fallbacks, cambios de GitHub y errores parciales pueden aumentar el número.
 
 ## Checkpoint y resume
 

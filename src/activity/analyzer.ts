@@ -30,7 +30,7 @@ import { chunkValues } from "../utils/chunks.js";
 import { mapWithConcurrency } from "../utils/concurrency.js";
 
 export const DEFAULT_GRAPHQL_CONCURRENCY = 4;
-export const ACTIVITY_BATCH_SIZE = 25;
+export const ACTIVITY_BATCH_SIZE = 12;
 
 export interface RecentBatchHttpFailure {
   logins: readonly string[];

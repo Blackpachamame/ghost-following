@@ -9,6 +9,7 @@ import {
   DEFAULT_BENCHMARK_SAMPLE_SIZE,
   DEFAULT_BENCHMARK_SIZES,
   MAX_BENCHMARK_SAMPLE_SIZE,
+  MAX_BENCHMARK_BATCH_SIZE,
   MIN_BENCHMARK_SAMPLE_SIZE,
   createCurrentBatchSizeExecutor,
   prepareBatchSizeBenchmark,
@@ -24,7 +25,7 @@ import {
 const GITHUB_USERNAME_PATTERN = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i;
 
 export const RECENT_BATCH_SIZE_USAGE =
-  "Usage: npm run diagnose:recent-batch-sizes -- <audit-username> [--days <positive integer>] [--sample-size <50-500>] [--sizes <1..25,...>]";
+  `Usage: npm run diagnose:recent-batch-sizes -- <audit-username> [--days <positive integer>] [--sample-size <50-500>] [--sizes <1..${MAX_BENCHMARK_BATCH_SIZE},...>]`;
 
 export const RECENT_BATCH_SIZE_HELP = [
   "GitHub Ghost Following - Recent Batch Size Benchmark",
@@ -42,7 +43,7 @@ export const RECENT_BATCH_SIZE_HELP = [
   "Options:",
   `  --days <integer>       Recent period in positive whole days (default: ${DEFAULT_BENCHMARK_DAYS}).`,
   `  --sample-size <number> Deterministic sample size ${MIN_BENCHMARK_SAMPLE_SIZE}-${MAX_BENCHMARK_SAMPLE_SIZE} (default: ${DEFAULT_BENCHMARK_SAMPLE_SIZE}).`,
-  `  --sizes <list>         Unique ordered integers 1-25 (default: ${DEFAULT_BENCHMARK_SIZES.join(",")}).`,
+  `  --sizes <list>         Unique ordered integers 1-${MAX_BENCHMARK_BATCH_SIZE} (default: ${DEFAULT_BENCHMARK_SIZES.join(",")}).`,
   "  --help, -h             Show this help without making requests.",
 ].join("\n");
 
@@ -68,7 +69,7 @@ function parsePositiveInteger(value: string, option: string): number {
 export function parseBenchmarkSizes(value: string): number[] {
   const tokens = value.split(",");
   if (tokens.length === 0 || tokens.some((token) => token.length === 0 || !/^\d+$/.test(token))) {
-    throw new RecentBatchSizeUsageError("--sizes requires comma-separated unique integers from 1 to 25.");
+    throw new RecentBatchSizeUsageError(`--sizes requires comma-separated unique integers from 1 to ${MAX_BENCHMARK_BATCH_SIZE}.`);
   }
   const sizes = tokens.map(Number);
   try {

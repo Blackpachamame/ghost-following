@@ -42,7 +42,7 @@ describe("recent batch-size report", () => {
     const result = await runBatchSizeBenchmark(prepared, async (_logins, size) => ({ ...metric(), elapsedMs: size === 10 ? 90 : 100 }));
     const report = formatRecentBatchSizeBenchmark(result, "result.json");
     assert.match(report, /Best observed zero-processing-failure throughput in this sample/);
-    assert.match(report, /Production default 25 was not included/);
+    assert.match(report, /Production default 12 was not included/);
     assert.match(report, /not a universal GitHub batch-size limit/);
   });
 

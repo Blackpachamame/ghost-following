@@ -192,6 +192,20 @@ describe("recent batch investigation source", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("accepts a legacy 25-login failure incident after production moves to 12", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ghost-following-legacy-source-"));
+    const path = recentBatchFailureDiagnosticPathFor(AUDIT_USERNAME, root);
+    try {
+      await mkdir(root, { recursive: true });
+      await writeFile(path, JSON.stringify(incident()) + "\n", "utf8");
+      const loaded = await loadLatestRecentBatchFailureIncident(AUDIT_USERNAME, { root });
+      assert.equal(loaded.batchSize, 25);
+      assert.deepEqual(loaded.logins, logins(25));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("recent batch investigation strategy", () => {

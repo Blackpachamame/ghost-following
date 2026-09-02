@@ -753,7 +753,7 @@ describe("CLI options", () => {
           resetAt,
         },
       };
-      for (let index = 0; index < 25; index += 1) {
+      for (let index = 0; index < 12; index += 1) {
         const login = body.variables[`login${index}`]!;
         data[`u${index}`] = {
           login,
@@ -794,7 +794,7 @@ describe("CLI options", () => {
 
       assert.equal(exitCode, 1);
       assert.equal(graphQLRequests, 1);
-      assert.deepEqual(logs, ["Analyzing recent activity: 25 / 26"]);
+      assert.deepEqual(logs, ["Analyzing recent activity: 12 / 26"]);
       assert.match(errors[0] ?? "", /GitHub GraphQL rate limit exhausted/);
       assert.match(errors[0] ?? "", /Progress saved/);
       assert.match(errors[0] ?? "", new RegExp(resetAt));
@@ -805,7 +805,7 @@ describe("CLI options", () => {
       const saved = JSON.parse(await readFile(path, "utf8")) as {
         completedRecentActivity: Record<string, unknown>;
       };
-      assert.equal(Object.keys(saved.completedRecentActivity).length, 25);
+      assert.equal(Object.keys(saved.completedRecentActivity).length, 12);
       assert.doesNotMatch(await readFile(path, "utf8"), /obvious-test-placeholder/);
     } finally {
       await rm(root, { recursive: true, force: true });

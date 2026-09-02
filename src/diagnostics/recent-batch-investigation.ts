@@ -1,6 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { ACTIVITY_BATCH_SIZE } from "../activity/analyzer.js";
 import type { ActivityPeriod } from "../domain/activity.js";
 import type { BatchAccountActivityQueryResult } from "../github/batch-activity.js";
 import {
@@ -12,6 +11,7 @@ import {
   recentBatchFailureDiagnosticPathFor,
   type RecentBatchFailureIncident,
 } from "./recent-batch-failures.js";
+import { MAX_SUPPORTED_DIAGNOSTIC_BATCH_SIZE } from "./recent-diagnostic-limits.js";
 
 const GITHUB_USERNAME_PATTERN = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i;
 const INVESTIGATION_SCHEMA_VERSION = 1;
@@ -152,7 +152,7 @@ function parseLogins(value: unknown): string[] | undefined {
   if (
     !Array.isArray(value) ||
     value.length === 0 ||
-    value.length > ACTIVITY_BATCH_SIZE ||
+    value.length > MAX_SUPPORTED_DIAGNOSTIC_BATCH_SIZE ||
     !value.every(
       (login) =>
         typeof login === "string" && GITHUB_USERNAME_PATTERN.test(login),

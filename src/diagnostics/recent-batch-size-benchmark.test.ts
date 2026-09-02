@@ -5,6 +5,7 @@ import { buildAccountActivityBatchQuery } from "../github/batch-activity.js";
 import {
   createCurrentBatchSizeExecutor, deterministicSampleLogins, median, partitionBenchmarkSample,
   prepareBatchSizeBenchmark, runBatchSizeBenchmark, selectBenchmarkCandidate, summarizeBatchSize,
+  MAX_BENCHMARK_BATCH_SIZE,
   type BatchSizeMeasurement, type PreparedBatchSizeBenchmark,
 } from "./recent-batch-size-benchmark.js";
 import type { RecentQueryOutcome } from "./recent-query-comparison.js";
@@ -75,6 +76,7 @@ describe("recent batch-size preparation", () => {
     const value = prepared([6, 8, 10, 12, 15, 25]);
     assert.deepEqual(value.plannedLogicalBatches.map(({ batches }) => batches), [5, 4, 3, 3, 2, 1]);
     assert.equal(value.totalPlannedLogicalBatches, 18);
+    assert.equal(MAX_BENCHMARK_BATCH_SIZE, 25);
   });
 });
 
@@ -188,11 +190,19 @@ describe("recent batch-size aggregation", () => {
     assert.equal(selectBenchmarkCandidate([{ ...base, completed: false }]), null);
   });
 
-  it("does not execute production 25 implicitly when it was not requested", async () => {
+  it("does not execute production 12 implicitly when it was not requested", async () => {
     const seen: number[] = [];
     const result = await runBatchSizeBenchmark(prepared([10]), async (_logins, size) => { seen.push(size); return metric(); });
-    assert.equal(seen.includes(25), false);
+    assert.equal(seen.includes(12), false);
     assert.equal(result.productionComparison.included, false);
     assert.equal(result.productionComparison.production, null);
+  });
+
+  it("locates production 12 when explicitly included while still accepting diagnostic size 25", async () => {
+    const result = await runBatchSizeBenchmark(prepared([25, 12]), async () => metric());
+    assert.equal(result.productionBatchSize, 12);
+    assert.equal(result.productionComparison.productionBatchSize, 12);
+    assert.equal(result.productionComparison.included, true);
+    assert.equal(result.productionComparison.production?.configuredBatchSize, 12);
   });
 });

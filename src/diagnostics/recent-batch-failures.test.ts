@@ -130,7 +130,7 @@ async function runAuditHarness(
   }
   const logs: string[] = [];
   const errors: string[] = [];
-  const users = followedUsers(options.userCount ?? 25);
+  const users = followedUsers(options.userCount ?? 12);
   let graphqlRequests = 0;
   const fetchMock = (async (
     input: string | URL | Request,
@@ -322,7 +322,7 @@ describe("recent batch failure CLI diagnostics", () => {
   });
 
   for (const status of [502, 504]) {
-    it(`records and recovers the exact 25-user batch after exhausted HTTP ${status}`, async () => {
+    it(`records and recovers the exact 12-user production batch after exhausted HTTP ${status}`, async () => {
       const result = await runAuditHarness(
         (request, body) =>
           request <= 3
@@ -359,9 +359,9 @@ describe("recent batch failure CLI diagnostics", () => {
           },
           httpStatus: status,
           attempts: 3,
-          batchSize: 25,
+          batchSize: 12,
           logins: Array.from(
-            { length: 25 },
+            { length: 12 },
             (_value, index) => "user-" + index,
           ),
         });
@@ -370,18 +370,18 @@ describe("recent batch failure CLI diagnostics", () => {
           [
             "Recent batch exhausted retries after 3 attempts",
             "HTTP status: " + status,
-            "Batch size: 25",
+            "Batch size: 12",
             "Users:",
             ...incident.logins.map((login) => "  " + login),
             "",
-            "Retry fallback: splitting batch into 12 + 13.",
+            "Retry fallback: splitting batch into 6 + 6.",
           ].join("\n"),
         );
         assert.deepEqual(
           result.logs.filter((message) =>
             message.startsWith("Analyzing recent activity:"),
           ),
-          ["Analyzing recent activity: 25 / 25"],
+          ["Analyzing recent activity: 12 / 12"],
         );
         assert.doesNotMatch(file, /obvious-test-placeholder/i);
         assert.doesNotMatch(file, /authorization/i);
@@ -409,8 +409,8 @@ describe("recent batch failure CLI diagnostics", () => {
         logins: string[];
       };
       assert.equal(incident.httpStatus, 503);
-      assert.equal(incident.batchSize, 25);
-      assert.equal(incident.logins.length, 25);
+      assert.equal(incident.batchSize, 12);
+      assert.equal(incident.logins.length, 12);
       assert.match(
         result.errors[0] ?? "",
         /^Recent batch exhausted retries after 3 attempts/,
@@ -502,7 +502,7 @@ describe("recent batch failure CLI diagnostics", () => {
   it("records each exact nested HTTP timeout batch as a separate incident", async () => {
     const result = await runAuditHarness((_, body) => {
       const logins = requestedLogins(body);
-      return logins.length === 25 || logins.length === 13
+      return logins.length === 12 || (logins.length === 6 && logins[0] === "user-6")
         ? new Response("", { status: 504 })
         : new Response(JSON.stringify(successfulBatchPayload(body)), {
             status: 200,
@@ -523,13 +523,13 @@ describe("recent batch failure CLI diagnostics", () => {
       assert.deepEqual(
         incidents.map(({ httpStatus, batchSize }) => ({ httpStatus, batchSize })),
         [
-          { httpStatus: 504, batchSize: 25 },
-          { httpStatus: 504, batchSize: 13 },
+          { httpStatus: 504, batchSize: 12 },
+          { httpStatus: 504, batchSize: 6 },
         ],
       );
       assert.deepEqual(
         incidents[1]?.logins,
-        Array.from({ length: 13 }, (_value, index) => "user-" + (index + 12)),
+        Array.from({ length: 6 }, (_value, index) => "user-" + (index + 6)),
       );
     } finally {
       await rm(result.root, { recursive: true, force: true });
@@ -608,7 +608,7 @@ describe("recent batch failure CLI diagnostics", () => {
         >;
       };
       assert.equal(saved.schemaVersion, 1);
-      assert.equal(Object.keys(saved.completedRecentActivity).length, 12);
+      assert.equal(Object.keys(saved.completedRecentActivity).length, 6);
 
       const resumedRequests: string[][] = [];
       const resumed = await runAuditHarness(
@@ -622,7 +622,7 @@ describe("recent batch failure CLI diagnostics", () => {
       );
       assert.equal(resumed.exitCode, 0);
       assert.deepEqual(resumedRequests, [
-        Array.from({ length: 13 }, (_value, index) => "user-" + (index + 12)),
+        Array.from({ length: 6 }, (_value, index) => "user-" + (index + 6)),
       ]);
       await assertMissing(checkpointPath);
     } finally {
@@ -703,8 +703,8 @@ describe("recent batch failure CLI diagnostics", () => {
         completedRecentActivity: Record<string, { status: string }>;
       };
       assert.equal(saved.schemaVersion, 1);
-      assert.equal(Object.keys(saved.completedRecentActivity).length, 25);
-      assert.equal(saved.completedRecentActivity["user-25"], undefined);
+      assert.equal(Object.keys(saved.completedRecentActivity).length, 12);
+      assert.equal(saved.completedRecentActivity["user-12"], undefined);
       await assertMissing(first.diagnosticPath);
 
       const resumedRequests: string[][] = [];
@@ -718,7 +718,10 @@ describe("recent batch failure CLI diagnostics", () => {
         { root, userCount: 26, args: ["--resume"] },
       );
       assert.equal(resumed.exitCode, 0);
-      assert.deepEqual(resumedRequests, [["user-25"]]);
+      assert.deepEqual(resumedRequests, [
+        Array.from({ length: 12 }, (_value, index) => "user-" + (index + 12)),
+        ["user-24", "user-25"],
+      ]);
       await assertMissing(checkpointPath);
     } finally {
       await rm(root, { recursive: true, force: true });

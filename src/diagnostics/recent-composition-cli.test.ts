@@ -111,6 +111,24 @@ describe("recent composition CLI arguments", () => {
 });
 
 describe("recent composition CLI isolation", () => {
+  it("replays a legacy FULL25 source and preserves LEFT12/RIGHT13 shapes", async () => {
+    const root = await tempRoot();
+    const source = join(root, "legacy-25.jsonl");
+    const output = join(root, "composition-probes");
+    const logins = Array.from({ length: 25 }, (_value, index) => `legacy-${index}`);
+    await writeFile(source, incidentLine("2026-08-26T13:36:53.707Z", logins));
+    const seen: string[] = [];
+    const exit = await runRecentCompositionCli(["AuditUser", "--source", source, "--target", "FULL"], {
+      token: "test-token", fetch: successfulFetch(seen), sleep: async () => undefined,
+      now: new Date("2026-08-28T01:00:00Z"), outputRoot: output,
+      io: { log: () => undefined, error: () => undefined },
+    });
+    assert.equal(exit, 0);
+    const sizes = seen.slice(0, 3).map((body) => Object.keys((JSON.parse(body) as { variables: Record<string, string> }).variables)
+      .filter((key) => key.startsWith("login")).length);
+    assert.deepEqual(sizes, [25, 12, 13]);
+  });
+
   it("selects the exact timestamp and RIGHT target, preserves source, and writes only composition-probes", async () => {
     const root = await tempRoot();
     const source = join(root, "failures.jsonl");

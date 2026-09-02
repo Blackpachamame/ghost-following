@@ -124,9 +124,9 @@ export function formatRecentBatchSizeBenchmark(benchmark: RecentBatchSizeBenchma
     lines.push(`${benchmark.candidate.rationale}: ${benchmark.candidate.configuredBatchSize} (${benchmark.candidate.successfulUsersPerSecond.toFixed(2)} users/s).`);
   }
   if (!benchmark.productionComparison.included) {
-    lines.push("Production default 25 was not included in this benchmark; it was not executed implicitly.");
+    lines.push(`Production default ${benchmark.productionBatchSize} was not included in this benchmark; it was not executed implicitly.`);
   } else if (benchmark.productionComparison.production === null) {
-    lines.push("Production default 25 was requested but was not reached before the benchmark halted.");
+    lines.push(`Production default ${benchmark.productionBatchSize} was requested but was not reached before the benchmark halted.`);
   } else {
     lines.push(comparisonLine("Production", benchmark.productionComparison.production));
     if (benchmark.productionComparison.candidate !== null) {

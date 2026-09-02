@@ -1,12 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { ACTIVITY_BATCH_SIZE } from "../activity/analyzer.js";
 import type { ActivityPeriod } from "../domain/activity.js";
 import { TRANSIENT_MAX_ATTEMPTS } from "../github/retry.js";
 import {
   recentBatchFailureDiagnosticPathFor,
   type RecentBatchFailureIncident,
 } from "./recent-batch-failures.js";
+import { MAX_SUPPORTED_DIAGNOSTIC_BATCH_SIZE } from "./recent-diagnostic-limits.js";
 
 const GITHUB_USERNAME_PATTERN = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i;
 
@@ -42,7 +42,7 @@ function period(value: unknown): ActivityPeriod | undefined {
 }
 
 function logins(value: unknown): string[] | undefined {
-  if (!Array.isArray(value) || value.length === 0 || value.length > ACTIVITY_BATCH_SIZE ||
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_SUPPORTED_DIAGNOSTIC_BATCH_SIZE ||
       !value.every((item) => typeof item === "string" && GITHUB_USERNAME_PATTERN.test(item))) return undefined;
   const values = value as string[];
   return new Set(values.map((item) => item.toLowerCase())).size === values.length

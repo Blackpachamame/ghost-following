@@ -75,6 +75,17 @@ describe("recent query comparison CLI and files", () => {
       (error) => error instanceof RecentQuerySourceError && /No valid recent failure incident/.test(error.message));
   });
 
+  it("accepts a legacy 25-login source for query comparison", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "legacy-25.jsonl");
+    const logins = Array.from({ length: 25 }, (_value, index) => `legacy-${index}`);
+    await writeFile(source, JSON.stringify({
+      timestamp: "2026-08-25T01:00:00Z", auditUsername: "AuditUser", phase: "recent", period: PERIOD,
+      httpStatus: 504, attempts: 3, batchSize: 25, logins,
+    }));
+    assert.deepEqual((await loadRecentQuerySource("AuditUser", { source })).incident.logins, logins);
+  });
+
   it("uses the standard source path when --source is absent", async () => {
     const root = await temporaryDirectory();
     const path = join(root, "AuditUser-failures.jsonl");
