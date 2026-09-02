@@ -365,6 +365,19 @@ Por cada run mide el target, sus dos mitades y tres muestras N-1 (`DROP_FIRST`, 
 
 El comando puede consumir múltiples requests GraphQL reales. No hace audit, REST, historical, checkpoints ni exports; no cambia producción ni modifica el failure JSONL. Los resultados se guardan bajo `.ghost-following/diagnostics/composition-probes/`. Los outcomes pueden variar por intermitencia del backend, y que un singleton falle no demuestra causalidad individual.
 
+### Recent batch size benchmark
+
+Este benchmark diagnóstico obtiene el following completo por REST una sola vez, filtra `User` y construye una muestra determinista mediante SHA-256. Todos los tamaños procesan exactamente los mismos usuarios, en el mismo orden y durante el mismo período:
+
+```bash
+npm run diagnose:recent-batch-sizes -- PratikDhanave --days 365 --sample-size 200 --sizes 6,8,10,12,15,25
+npm run diagnose:recent-batch-sizes -- --help
+```
+
+Las queries GraphQL `CURRENT` se ejecutan secuencialmente y sin adaptive fallback: un batch agotado permanece fallido para poder medir la confiabilidad cruda del tamaño inicial. No hace historical, checkpoints, resume ni exports productivos, y no modifica `ACTIVITY_BATCH_SIZE` ni el resolver productivo. Los resultados schema 1 se guardan en `.ghost-following/diagnostics/batch-size-benchmarks/`.
+
+La recomendación, cuando existe un tamaño sin processing failures, identifica sólo el mejor throughput observado en esa muestra y ejecución. No establece un tamaño óptimo ni un límite universal de GitHub.
+
 ## Desarrollo
 
 ```bash
