@@ -118,12 +118,39 @@ function formatRateLimitLines(
   return lines;
 }
 
+export interface SuggestedResumeCommandOptions {
+  username: string;
+  days: number;
+  historyYears: number;
+  jsonPath?: string;
+  csvPath?: string;
+}
+
+function formatCliArgument(value: string): string {
+  if (/^[a-z\d_./:-]+$/i.test(value)) return value;
+  if (!value.includes("'")) return `'${value}'`;
+  return JSON.stringify(value);
+}
+
 export function formatSuggestedResumeCommand(
-  username: string,
-  days: number,
-  historyYears: number,
+  options: SuggestedResumeCommandOptions,
 ): string {
-  return `npm run start -- ${username} --days ${days}${historyYears === 0 ? "" : ` --history-years ${historyYears}`} --resume`;
+  const args = [
+    "npm run start --",
+    formatCliArgument(options.username),
+    `--days ${options.days}`,
+  ];
+  if (options.historyYears !== 0) {
+    args.push(`--history-years ${options.historyYears}`);
+  }
+  args.push("--resume");
+  if (options.jsonPath !== undefined) {
+    args.push(`--json ${formatCliArgument(options.jsonPath)}`);
+  }
+  if (options.csvPath !== undefined) {
+    args.push(`--csv ${formatCliArgument(options.csvPath)}`);
+  }
+  return args.join(" ");
 }
 
 export async function runCli(
@@ -143,6 +170,8 @@ export async function runCli(
   let progressSavedFor: string | undefined;
   let progressSavedDays = 0;
   let progressSavedHistoryYears = 0;
+  let progressSavedJsonPath: string | undefined;
+  let progressSavedCsvPath: string | undefined;
 
   try {
     const cliOptions = parseArgs(args);
@@ -220,6 +249,8 @@ export async function runCli(
     progressSavedFor = username;
     progressSavedDays = period.days;
     progressSavedHistoryYears = historyYears;
+    progressSavedJsonPath = cliOptions.jsonPath;
+    progressSavedCsvPath = cliOptions.csvPath;
 
     const saveCheckpoint = (): Promise<void> =>
       checkpointWriter.save(checkpoint);
@@ -342,11 +373,17 @@ export async function runCli(
         lines.push(
           "",
           "Run:",
-          `  ${formatSuggestedResumeCommand(
-            progressSavedFor,
-            progressSavedDays,
-            progressSavedHistoryYears,
-          )}`,
+          `  ${formatSuggestedResumeCommand({
+            username: progressSavedFor,
+            days: progressSavedDays,
+            historyYears: progressSavedHistoryYears,
+            ...(progressSavedJsonPath === undefined
+              ? {}
+              : { jsonPath: progressSavedJsonPath }),
+            ...(progressSavedCsvPath === undefined
+              ? {}
+              : { csvPath: progressSavedCsvPath }),
+          })}`,
         );
         io.error(lines.join("\n"));
         return 1;

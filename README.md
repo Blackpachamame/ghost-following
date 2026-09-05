@@ -296,6 +296,12 @@ npm run start -- Blackpachamame --days 365 --history-years 3 --resume
 
 `--resume` reutiliza el período exacto y `historyYears` guardados, y omite usuarios recientes e históricos ya completados. Si se omite `--history-years`, hereda el valor del checkpoint; si se indica, debe coincidir o el resume termina con un error de configuración incompatible. Los checkpoints schema 1 anteriores que no poseen `historyYears` se interpretan como audits legacy de 5 años. Los días solicitados también deben coincidir.
 
+Cuando una ejecución interrumpida había solicitado exports, la sugerencia de `--resume` conserva esas rutas para que el reporte final se genere al completar el audit:
+
+```bash
+npm run start -- user --days 365 --resume --json reports/user.json --csv reports/user.csv
+```
+
 Sin `--resume`, una ejecución siempre es fresca: no reutiliza resultados, no hereda `historyYears` y no compara la configuración con un checkpoint anterior. Los argumentos de la nueva ejecución son la única autoridad.
 
 El following se consulta nuevamente. Si cambió, la CLI informa las cantidades agregadas y eliminadas, conserva resultados de cuentas aún seguidas, analiza las nuevas y excluye del resultado final las removidas.

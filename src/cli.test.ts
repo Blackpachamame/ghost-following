@@ -272,38 +272,103 @@ describe("CLI options", () => {
   it("builds deterministic and parseable resume commands", () => {
     const cases = [
       {
-        days: 180,
-        historyYears: 3,
-        expected:
-          "npm run start -- user --days 180 --history-years 3 --resume",
-      },
-      {
-        days: 365,
-        historyYears: 0,
+        options: { username: "user", days: 365, historyYears: 0 },
         expected: "npm run start -- user --days 365 --resume",
       },
       {
-        days: 365,
-        historyYears: 1,
+        options: { username: "user", days: 180, historyYears: 0 },
+        expected: "npm run start -- user --days 180 --resume",
+      },
+      {
+        options: {
+          username: "user",
+          days: 365,
+          historyYears: 0,
+          jsonPath: "reports/user.json",
+        },
         expected:
-          "npm run start -- user --days 365 --history-years 1 --resume",
+          "npm run start -- user --days 365 --resume --json reports/user.json",
+      },
+      {
+        options: {
+          username: "user",
+          days: 365,
+          historyYears: 0,
+          csvPath: "reports/user.csv",
+        },
+        expected:
+          "npm run start -- user --days 365 --resume --csv reports/user.csv",
+      },
+      {
+        options: {
+          username: "user",
+          days: 365,
+          historyYears: 0,
+          jsonPath: "reports/user.json",
+          csvPath: "reports/user.csv",
+        },
+        expected:
+          "npm run start -- user --days 365 --resume --json reports/user.json --csv reports/user.csv",
+      },
+      {
+        options: { username: "user", days: 365, historyYears: 3 },
+        expected:
+          "npm run start -- user --days 365 --history-years 3 --resume",
+      },
+      {
+        options: {
+          username: "user",
+          days: 365,
+          historyYears: 3,
+          jsonPath: "reports/user.json",
+          csvPath: "reports/user.csv",
+        },
+        expected:
+          "npm run start -- user --days 365 --history-years 3 --resume --json reports/user.json --csv reports/user.csv",
       },
     ];
 
-    for (const { days, historyYears, expected } of cases) {
-      const command = formatSuggestedResumeCommand(
-        "user",
-        days,
-        historyYears,
-      );
+    for (const { options, expected } of cases) {
+      const command = formatSuggestedResumeCommand(options);
       assert.equal(command, expected);
       const parsed = parseArgs(command.split(" ").slice(4));
       assert.equal(parsed.help, false);
       if (parsed.help) continue;
-      assert.equal(parsed.days, days);
-      assert.equal(parsed.historyYears ?? 0, historyYears);
+      assert.equal(parsed.days, options.days);
+      assert.equal(parsed.historyYears ?? 0, options.historyYears);
+      assert.equal(parsed.jsonPath, options.jsonPath);
+      assert.equal(parsed.csvPath, options.csvPath);
       assert.equal(parsed.resume, true);
     }
+  });
+
+  it("quotes a path with spaces without exposing unrelated secrets", () => {
+    const command = formatSuggestedResumeCommand({
+      username: "user",
+      days: 365,
+      historyYears: 0,
+      jsonPath: "reports/my report.json",
+    });
+
+    assert.equal(
+      command,
+      "npm run start -- user --days 365 --resume --json 'reports/my report.json'",
+    );
+    assert.doesNotMatch(command, /GITHUB_TOKEN|Authorization|secret-value/);
+  });
+
+  it("quotes a Windows export path containing backslashes", () => {
+    const command = formatSuggestedResumeCommand({
+      username: "user",
+      days: 365,
+      historyYears: 0,
+      jsonPath: String.raw`C:\reports\audit.json`,
+    });
+
+    assert.equal(
+      command,
+      "npm run start -- user --days 365 --resume --json 'C:\\reports\\audit.json'",
+    );
   });
 
   it("shows help without a username, token or request", async () => {
@@ -779,7 +844,17 @@ describe("CLI options", () => {
 
     try {
       const exitCode = await runCli(
-        ["octocat", "--days", "180", "--history-years", "3"],
+        [
+          "octocat",
+          "--days",
+          "180",
+          "--history-years",
+          "3",
+          "--json",
+          "reports/user.json",
+          "--csv",
+          "reports/user.csv",
+        ],
         {
           token: "obvious-test-placeholder",
           fetch: fetchMock,
@@ -802,7 +877,7 @@ describe("CLI options", () => {
       assert.match(errors[0] ?? "", new RegExp(resetAt));
       assert.match(
         errors[0] ?? "",
-        /npm run start -- octocat --days 180 --history-years 3 --resume/,
+        /npm run start -- octocat --days 180 --history-years 3 --resume --json reports\/user\.json --csv reports\/user\.csv/,
       );
       const saved = JSON.parse(await readFile(path, "utf8")) as {
         completedRecentActivity: Record<string, unknown>;
@@ -888,7 +963,15 @@ describe("CLI options", () => {
     const errors: string[] = [];
 
     try {
-      const exitCode = await runCli(["octocat", "--days", "365"], {
+      const exitCode = await runCli([
+        "octocat",
+        "--days",
+        "365",
+        "--json",
+        "reports/user.json",
+        "--csv",
+        "reports/user.csv",
+      ], {
         token: "top-secret-token",
         fetch: fetchMock,
         checkpointRoot: root,
@@ -910,7 +993,7 @@ describe("CLI options", () => {
       assert.match(errors[0] ?? "", /Progress saved/);
       assert.match(
         errors[0] ?? "",
-        /npm run start -- octocat --days 365 --resume/,
+        /npm run start -- octocat --days 365 --resume --json reports\/user\.json --csv reports\/user\.csv/,
       );
       assert.doesNotMatch(
         errors[0] ?? "",
@@ -957,6 +1040,87 @@ describe("CLI options", () => {
       errors[0] ?? "",
       /primary rate limit exhausted|secondary rate limit reached|unknown-secret-token/i,
     );
+  });
+
+  it("preserves exports when a resumed audit hits an UNKNOWN GraphQL rate limit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ghost-following-resume-exports-"));
+    const checkpointRoot = join(root, "checkpoints");
+    const now = new Date("2026-08-24T00:00:00.000Z");
+    const period = createActivityPeriod(now);
+    const checkpoint = createCheckpoint(
+      "octocat",
+      period,
+      [activeFollowedAccount],
+      now,
+    );
+    await writeCheckpointAtomic(
+      checkpointPathFor("octocat", checkpointRoot),
+      checkpoint,
+      now,
+    );
+    const errors: string[] = [];
+    let graphQLRequests = 0;
+
+    try {
+      const exitCode = await runCli(
+        [
+          "octocat",
+          "--days",
+          "365",
+          "--resume",
+          "--json",
+          "reports/user.json",
+          "--csv",
+          "reports/user.csv",
+        ],
+        {
+          token: "test-placeholder",
+          checkpointRoot,
+          now,
+          fetch: (async (input: string | URL | Request) => {
+            if (String(input).includes("/following")) {
+              return new Response(
+                JSON.stringify([
+                  {
+                    login: activeFollowedAccount.login,
+                    id: activeFollowedAccount.id,
+                    type: activeFollowedAccount.type,
+                    html_url: activeFollowedAccount.htmlUrl,
+                  },
+                ]),
+                { status: 200 },
+              );
+            }
+            graphQLRequests += 1;
+            return new Response(
+              '{"message":"Request temporarily restricted."}',
+              {
+                status: 429,
+                headers: {
+                  "x-ratelimit-limit": "5000",
+                  "x-ratelimit-remaining": "4864",
+                },
+              },
+            );
+          }) as typeof fetch,
+          sleep: async () => {
+            throw new Error("sleep must not be called");
+          },
+          io: { log() {}, error: (message) => errors.push(message) },
+        },
+      );
+
+      assert.equal(exitCode, 1);
+      assert.equal(graphQLRequests, 1);
+      assert.match(errors[0] ?? "", /GitHub GraphQL rate limit encountered/);
+      assert.match(errors[0] ?? "", /Progress saved/);
+      assert.match(
+        errors[0] ?? "",
+        /npm run start -- octocat --days 365 --resume --json reports\/user\.json --csv reports\/user\.csv/,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("reports the manual secondary wait guidance when Retry-After is absent", async () => {
