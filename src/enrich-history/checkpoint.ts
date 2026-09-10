@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { CheckpointError } from "../checkpoint.js";
+import { isExportedGitHubLogin } from "./login.js";
 import {
   createHistoricalPeriods,
   MAX_HISTORICAL_LOOKBACK_YEARS,
@@ -111,7 +112,7 @@ function validateResults(
   for (const [key, item] of Object.entries(value)) {
     if (
       !isRecord(item) ||
-      !validLogin(item.login) ||
+      !isExportedGitHubLogin(item.login) ||
       key !== item.login.toLocaleLowerCase("en-US") ||
       (item.historicalLookupStatus !== "FOUND" &&
         item.historicalLookupStatus !== "NOT_FOUND_IN_LOOKBACK" &&

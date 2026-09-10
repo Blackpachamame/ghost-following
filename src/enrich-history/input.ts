@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseUsername } from "../args.js";
+import { isExportedGitHubLogin } from "./login.js";
 import { AUDIT_SCHEMA_VERSION, type AuditResult } from "../domain/audit.js";
 
 export class AuditInputError extends Error {
@@ -97,7 +98,9 @@ function validateAudit(value: unknown): asserts value is AuditResult {
   for (const [index, value] of audit.accounts.entries()) {
     const field = `accounts[${index}]`;
     const account = record(value, field);
-    if (!isUsername(account.login)) invalid(`${field}.login must be a valid GitHub username`);
+    if (!isExportedGitHubLogin(account.login)) {
+      invalid(`${field}.login must be a nonempty string without surrounding whitespace or control characters`);
+    }
     const key = account.login.toLowerCase();
     if (logins.has(key)) invalid("accounts must contain unique logins (case-insensitive)");
     logins.add(key);

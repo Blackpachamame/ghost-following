@@ -169,6 +169,65 @@ describe("enrich-history arguments and help", () => {
 });
 
 describe("enrich-history offline workflow", () => {
+  it("preserves an ACTIVE LingDong- account without historical queries", async () => {
+    const f = await fixture(["ACTIVE"]);
+    try {
+      Object.assign(f.source.accounts[0]!, {
+        login: "LingDong-", url: "https://github.com/LingDong-",
+        totalContributions: 339, commitContributions: 333,
+        pullRequestContributions: 0, pullRequestReviewContributions: 0,
+        issueContributions: 0, restrictedContributionsCount: 0, hasActivityInThePast: true,
+      });
+      const sourceBytes = serializeAuditJson(f.source);
+      await writeFile(f.input, sourceBytes);
+      assert.equal(await runEnrichHistoryCli(f.args, {
+        ...f.options, token: "",
+        getToken() { assert.fail("must not read token"); },
+        fetch: mockedFetch(() => assert.fail("ACTIVE must not generate queries")),
+      }), 0, f.errors.join("\n"));
+      const output = JSON.parse(await readFile(f.json, "utf8")) as AuditResult;
+      assert.deepEqual(output.accounts, f.source.accounts);
+      assert.equal(output.accounts[0]!.login, "LingDong-");
+      assert.equal(output.accounts[0]!.status, "ACTIVE");
+      assert.deepEqual(output.summary, f.source.summary);
+      assert.equal(await readFile(f.input, "utf8"), sourceBytes);
+      assert.equal(await readFile(f.csv, "utf8"), serializeAuditCsv(output));
+    } finally { await f.cleanup(); }
+  });
+
+  it("queries a quiet trailing-hyphen login exactly as a GraphQL variable and preserves it", async () => {
+    const f = await fixture([quiet]);
+    const queries: Query[] = [];
+    try {
+      Object.assign(f.source.accounts[0]!, {
+        login: "quiet-user-", url: "https://github.com/quiet-user-",
+      });
+      const sourceBytes = serializeAuditJson(f.source);
+      await writeFile(f.input, sourceBytes);
+      assert.equal(await runEnrichHistoryCli(f.args, {
+        ...f.options,
+        fetch: mockedFetch((query) => {
+          queries.push(query);
+          assert.equal(query.variables.login, "quiet-user-");
+          assert.equal(query.query, HISTORICAL_ACTIVITY_QUERY);
+          assert.ok(!query.query.includes("quiet-user-"));
+          return historicalResponse(query, { date: "2025-03-17" });
+        }),
+      }), 0, f.errors.join("\n"));
+      assert.equal(queries.length, 1);
+      const output = JSON.parse(await readFile(f.json, "utf8")) as AuditResult;
+      assert.deepEqual(output.accounts, [{
+        ...f.source.accounts[0]!,
+        historicalLookupStatus: "FOUND", lastVisibleActivityAt: "2025-03-17",
+      }]);
+      assert.equal(output.accounts[0]!.login, "quiet-user-");
+      assert.equal(output.accounts[0]!.status, quiet);
+      assert.deepEqual(output.summary, f.source.summary);
+      assert.equal(await readFile(f.input, "utf8"), sourceBytes);
+      assert.equal(await readFile(f.csv, "utf8"), serializeAuditCsv(output));
+    } finally { await f.cleanup(); }
+  });
+
   it("rejects bad sources before token access or GitHub", async () => {
     const cases: Array<{ contents?: string; change?: (audit: AuditResult) => void; error: RegExp }> = [
       { contents: "sensitive-file-contents", error: /JSON/i },
@@ -329,6 +388,68 @@ describe("enrich-history offline workflow", () => {
       } finally { await f.cleanup(); }
     });
   }
+
+  it("resumes after a secondary limit without repeating a completed exported trailing-hyphen login", async () => {
+    const f = await fixture([quiet, quiet]);
+    const firstQueries: string[] = [];
+    const found = {
+      login: "quiet-user-", lastVisibleActivityAt: "2025-03-17",
+      historicalLookupStatus: "FOUND",
+    };
+    try {
+      f.source.accounts = [account("quiet-user-", quiet), account("second-user", quiet)];
+      const sourceBytes = serializeAuditJson(f.source);
+      await writeFile(f.input, sourceBytes);
+      assert.equal(await runEnrichHistoryCli(f.args, {
+        ...f.options,
+        fetch: mockedFetch(async (query) => {
+          firstQueries.push(query.variables.login);
+          if (query.variables.login === "quiet-user-") {
+            return historicalResponse(query, { date: found.lastVisibleActivityAt });
+          }
+          assert.equal(query.variables.login, "second-user");
+          const saved = await loadHistoryEnrichmentCheckpoint(f.checkpoint);
+          assert.deepEqual(saved.completedHistoricalActivity, { "quiet-user-": found });
+          return rateLimitResponse("SECONDARY");
+        }),
+      }), 1, f.errors.join("\n"));
+      assert.deepEqual(firstQueries, ["quiet-user-", "second-user"]);
+      assert.match(f.errors.join("\n"), /secondary rate limit reached/);
+      assert.match(f.errors.join("\n"), /Progress saved/);
+      const saved = await loadHistoryEnrichmentCheckpoint(f.checkpoint);
+      assert.deepEqual(saved.completedHistoricalActivity, { "quiet-user-": found });
+      assert.equal(saved.user, f.source.user);
+      assert.equal(saved.schemaVersion, 1);
+      await assert.rejects(access(f.json));
+      await assert.rejects(access(f.csv));
+
+      const resumedQueries: string[] = [];
+      assert.equal(await runEnrichHistoryCli([...f.args, "--resume"], {
+        ...f.options,
+        fetch: mockedFetch((query) => {
+          resumedQueries.push(query.variables.login);
+          assert.equal(query.variables.login, "second-user");
+          return historicalResponse(query, { date: "2025-05-01" });
+        }),
+      }), 0, f.errors.join("\n"));
+      assert.deepEqual(resumedQueries, ["second-user"]);
+      const output = JSON.parse(await readFile(f.json, "utf8")) as AuditResult;
+      assert.deepEqual(output.accounts[0], {
+        ...f.source.accounts[0]!,
+        lastVisibleActivityAt: found.lastVisibleActivityAt,
+        historicalLookupStatus: found.historicalLookupStatus,
+      });
+      assert.equal(output.accounts[0]!.login, "quiet-user-");
+      assert.equal(output.accounts[0]!.status, quiet);
+      assert.equal(output.accounts[0]!.historicalLookupStatus, "FOUND");
+      assert.deepEqual(output.summary, f.source.summary);
+      assert.deepEqual(output.period, f.source.period);
+      assert.equal(await readFile(f.input, "utf8"), sourceBytes);
+      assert.equal(await readFile(f.csv, "utf8"), serializeAuditCsv(output));
+      assert.match(f.messages.join("\n"), /Enriching historical activity: 2 \/ 2/);
+      await assert.rejects(access(f.checkpoint));
+    } finally { await f.cleanup(); }
+  });
 
   it("rejects modified source and incompatible requested years on resume before GitHub", async () => {
     const f = await fixture();

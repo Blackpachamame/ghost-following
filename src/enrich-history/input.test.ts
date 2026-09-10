@@ -4,6 +4,7 @@ import { link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { describe, it, type TestContext } from "node:test";
+import { normalizeAccount } from "../domain/account.js";
 import type { AuditResult } from "../domain/audit.js";
 import { serializeAuditJson } from "../export/json.js";
 import { assertDistinctPaths, AuditInputError, readAuditExport } from "./input.js";
@@ -70,6 +71,46 @@ describe("historical enrichment source reader", () => {
     assert.equal(Object.hasOwn(loaded.audit.accounts[0]!, "hasAnyContributions"), false);
   });
 
+  it("reads exported REST logins without applying manual CLI username rules", async (t) => {
+    const directory = await tempDirectory(t);
+    for (const login of ["LingDong-", "quiet-user-", "normal-user", "abc123", "legacy--user"]) {
+      const normalized = normalizeAccount({
+        login, id: 1, type: "User", html_url: `https://github.com/${login}`,
+      });
+      const source = sourceFixture();
+      const index = login === "quiet-user-" ? 1 : 0;
+      Object.assign(source.accounts[index]!, {
+        login: normalized.login, url: normalized.htmlUrl, accountType: normalized.type,
+      });
+      const path = join(directory, "source.json");
+      await writeFile(path, serializeAuditJson(source));
+      const { audit } = await readAuditExport(path);
+      assert.deepEqual(audit, source);
+      assert.equal(audit.accounts[index]!.login, login);
+    }
+    const source = sourceFixture();
+    source.user = "LingDong-";
+    await assert.rejects(readAuditExport(await writeSource(directory, source)), /user must be a valid GitHub username/);
+  });
+
+  it("rejects empty, non-string, untrimmed and control-containing exported logins in every account", async (t) => {
+    const directory = await tempDirectory(t);
+    const invalidLogins = [
+      "", null, 123, " user", "user ", "user\nother", "user\r", "user\tother",
+      "user\u0000other", "user\u001bother", "user\u007fother", "user\u0085other",
+    ];
+    for (const index of [0, 1]) {
+      for (const login of invalidLogins) {
+        const source = sourceFixture();
+        Object.assign(source.accounts[index]!, { login });
+        await assert.rejects(readAuditExport(await writeSource(directory, source)), {
+          name: "AuditInputError",
+          message: `Invalid input report: accounts[${index}].login must be a nonempty string without surrounding whitespace or control characters.`,
+        });
+      }
+    }
+  });
+
   it("fingerprints original bytes, including whitespace", async (t) => {
     const directory = await tempDirectory(t);
     const path = await writeSource(directory);
@@ -115,7 +156,7 @@ describe("historical enrichment source reader", () => {
       { change: (source) => { source.generatedAt = "2026-02-30T00:00:00.000Z"; }, expected: /generatedAt/ },
       { change: (source) => { source.period.days = 0; }, expected: /period.days/ },
       { change: (source) => { source.period.from = source.period.to; }, expected: /must precede/ },
-      { change: (source) => { source.accounts[0]!.login = "bad/login"; }, expected: /login/ },
+      { change: (source) => { Object.assign(source.accounts[0]!, { login: null }); }, expected: /login/ },
       { change: (source) => { source.accounts[0]!.accountType = "Organization"; }, expected: /accountType/ },
       { change: (source) => { Object.assign(source.accounts[0]!, { status: "GHOST" }); }, expected: /status is not recognized/ },
       { change: (source) => { source.accounts[0]!.totalContributions = -1; }, expected: /totalContributions/ },

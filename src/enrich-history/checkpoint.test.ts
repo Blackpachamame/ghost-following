@@ -121,6 +121,9 @@ describe("historical enrichment checkpoint", () => {
     );
     assert.throws(() => historyEnrichmentCheckpointPathFor("../escape"), CheckpointError);
     assert.throws(() => historyEnrichmentCheckpointPathFor("Owner\n"), CheckpointError);
+    for (const user of ["quiet-user-", "legacy--user"]) {
+      assert.throws(() => historyEnrichmentCheckpointPathFor(user), CheckpointError);
+    }
     for (const user of ["CON", "NUL", "AUX", "COM1"]) {
       assert.equal(
         basename(historyEnrichmentCheckpointPathFor(user)),
@@ -187,6 +190,39 @@ describe("historical enrichment checkpoint", () => {
       assert.doesNotThrow(() =>
         validateHistoryEnrichmentResume(loaded, auditFixture(), sourceHash, 3));
       assert.deepEqual(await readdir(directory), ["owner-history.json"]);
+    });
+  });
+
+  it("round-trips exported trailing and repeated hyphens without changing completed logins", async () => {
+    await withCheckpointPath(async (path) => {
+      for (const login of ["quiet-user-", "legacy--user"]) {
+        const audit = auditFixture();
+        audit.accounts[1] = account(login);
+        const checkpoint = createHistoryEnrichmentCheckpoint(audit, sourceHash, 3, now);
+        const result = completed(login, "FOUND", "2025-03-17");
+        checkpoint.completedHistoricalActivity[login.toLowerCase()] = result;
+        await new CheckpointWriter(path).save(checkpoint, now);
+        const loaded = await loadHistoryEnrichmentCheckpoint(path);
+        assert.deepEqual(loaded, checkpoint);
+        assert.deepEqual(loaded.completedHistoricalActivity[login.toLowerCase()], result);
+        assert.equal(loaded.schemaVersion, 1);
+        assert.doesNotThrow(() =>
+          validateHistoryEnrichmentResume(loaded, audit, sourceHash, 3));
+      }
+    });
+  });
+
+  it("rejects corrupted completed logins even when their checkpoint keys match", async () => {
+    await withCheckpointPath(async (path) => {
+      for (const login of [
+        "", " user", "user ", "user\nother", "user\tother", "user\u0000other",
+        "user\r", "user\u001bother", "user\u007fother", "user\u0085other",
+      ]) {
+        const checkpoint = checkpointFixture();
+        checkpoint.completedHistoricalActivity[login.toLowerCase()] = completed(login);
+        await new CheckpointWriter(path).save(checkpoint, now);
+        await assert.rejects(loadHistoryEnrichmentCheckpoint(path), /invalid completed historical activity/);
+      }
     });
   });
 
@@ -394,6 +430,8 @@ describe("historical enrichment checkpoint", () => {
     const invalidStates: Record<string, unknown>[] = [
       { sourceHash: "wrong-hash" },
       { user: "../unsafe" },
+      { user: "quiet-user-" },
+      { user: "legacy--user" },
       { historyYears: 0 },
       { historyYears: 6 },
       { createdAt: "2026-02-30T00:00:00.000Z" },
