@@ -1,7 +1,6 @@
 import {
   calculateCoverage,
   classifyActivity,
-  createHistoricalPeriods,
   MAX_HISTORICAL_LOOKBACK_YEARS,
   type AccountActivityResult,
   type ActivityPeriod,
@@ -30,6 +29,7 @@ import type {
 } from "../github/graphql.js";
 import { chunkValues } from "../utils/chunks.js";
 import { mapWithConcurrency } from "../utils/concurrency.js";
+import { enrichHistoricalActivity } from "./historical.js";
 
 export const DEFAULT_GRAPHQL_CONCURRENCY = 4;
 export const ACTIVITY_BATCH_SIZE = 12;
@@ -187,14 +187,6 @@ function mapSavedResults(
     }
   }
   return result;
-}
-
-function isReusableHistoricalResult(result: AccountActivityResult): boolean {
-  return (
-    result.historicalLookupStatus === "FOUND" ||
-    result.historicalLookupStatus === "NOT_FOUND_IN_LOOKBACK" ||
-    result.historicalLookupStatus === "FAILED"
-  );
 }
 
 function successfulWorkResult(
@@ -436,74 +428,6 @@ async function resolveBatchWithFallback(
     : { work, rateLimit: fallbackRateLimit };
 }
 
-async function completeHistoricalResult(
-  recent: AccountActivityResult,
-  client: ActivityProvider,
-  historicalPeriods: readonly ActivityPeriod[],
-  observedRateLimit: GraphQLRateLimit | undefined,
-): Promise<WorkResult> {
-  if (recent.activity === undefined) {
-    throw new Error("Historical candidate is missing recent activity data.");
-  }
-
-  let historicalRateLimit = observedRateLimit;
-  try {
-    for (const historicalPeriod of historicalPeriods) {
-      ensureQuota(historicalRateLimit);
-      const queryResult = await client.getHistoricalActivity(
-        recent.account.login,
-        historicalPeriod,
-      );
-      historicalRateLimit = selectLatestRateLimit([
-        historicalRateLimit,
-        queryResult.rateLimit,
-      ]);
-      if (queryResult.lastVisibleActivityAt !== null) {
-        const found: WorkResult = {
-          result: {
-            ...recent,
-            lastVisibleActivityAt: queryResult.lastVisibleActivityAt,
-            historicalLookupStatus: "FOUND",
-          },
-        };
-        if (historicalRateLimit !== undefined) {
-          found.rateLimit = historicalRateLimit;
-        }
-        return found;
-      }
-    }
-    const notFound: WorkResult = {
-      result: {
-        ...recent,
-        lastVisibleActivityAt: null,
-        historicalLookupStatus: "NOT_FOUND_IN_LOOKBACK",
-      },
-    };
-    if (historicalRateLimit !== undefined) {
-      notFound.rateLimit = historicalRateLimit;
-    }
-    return notFound;
-  } catch (error) {
-    if (error instanceof GitHubGraphQLAccountError) {
-      const rateLimit = selectLatestRateLimit([
-        historicalRateLimit,
-        isGraphQLRateLimit(error.rateLimit) ? error.rateLimit : undefined,
-      ]);
-      const work: WorkResult = {
-        result: {
-          ...recent,
-          lastVisibleActivityAt: null,
-          historicalLookupStatus: "FAILED",
-          historicalLookupError: error.message,
-        },
-      };
-      if (rateLimit !== undefined) work.rateLimit = rateLimit;
-      return work;
-    }
-    throw error;
-  }
-}
-
 export async function analyzeFollowingActivity(
   accounts: readonly FollowedAccount[],
   client: ActivityProvider,
@@ -584,84 +508,19 @@ export async function analyzeFollowingActivity(
     }
     return rebindResult(result, account);
   });
-  const historicalCandidates = recentResults.filter(
-    ({ status }) => status === "NO_RECENT_VISIBLE_ACTIVITY",
-  );
-  if (historyYears === 0) {
-    const results = recentResults.map((recent) =>
-      recent.status === "NO_RECENT_VISIBLE_ACTIVITY"
-        ? {
-            ...recent,
-            lastVisibleActivityAt: null,
-            historicalLookupStatus: "NOT_REQUESTED" as const,
-          }
-        : recent,
-    );
-    const analysis: ActivityAnalysis = {
-      period,
-      historyYears,
-      followingTotal: accounts.length,
-      eligibleUsers: eligibleAccounts.length,
-      unsupportedAccounts: accounts.length - eligibleAccounts.length,
-      results,
-      counts: countStatuses(results),
-      coverage: calculateCoverage(results, eligibleAccounts.length),
-    };
-    if (latestRateLimit !== undefined) analysis.rateLimit = latestRateLimit;
-    return analysis;
-  }
-  const historicalByLogin = mapSavedResults(
-    options.completedHistoricalActivity,
-    eligibleAccounts,
-  );
-  for (const [key, result] of historicalByLogin) {
-    if (!isReusableHistoricalResult(result)) {
-      historicalByLogin.delete(key);
-    }
-  }
-  const pendingHistorical = historicalCandidates.filter(
-    ({ account }) => !historicalByLogin.has(loginKey(account.login)),
-  );
-  const historicalPeriods = createHistoricalPeriods(period, historyYears);
-  let historicalCompleted = historicalCandidates.length - pendingHistorical.length;
-
-  const historicalWorkResults = await mapWithConcurrency(
-    pendingHistorical,
+  const historical = await enrichHistoricalActivity(recentResults, client, period, {
+    historyYears,
     concurrency,
-    async (recent): Promise<WorkResult> => {
-      const work = await completeHistoricalResult(
-        recent,
-        client,
-        historicalPeriods,
-        latestRateLimit,
-      );
-      latestRateLimit = selectLatestRateLimit([
-        latestRateLimit,
-        work.rateLimit,
-      ]);
-      historicalByLogin.set(loginKey(recent.account.login), work.result);
-      historicalCompleted += 1;
-      await options.onHistoricalAccountCompleted?.(
-        work.result,
-        historicalCompleted,
-        historicalCandidates.length,
-        latestRateLimit,
-      );
-      return work;
-    },
-  );
-  latestRateLimit = selectLatestRateLimit([
-    latestRateLimit,
-    ...historicalWorkResults.map(({ rateLimit }) => rateLimit),
-  ]);
-
-  const results = recentResults.map((recent) => {
-    if (recent.status !== "NO_RECENT_VISIBLE_ACTIVITY") return recent;
-    return (
-      historicalByLogin.get(loginKey(recent.account.login)) ??
-      recent
-    );
+    ...(latestRateLimit === undefined ? {} : { initialRateLimit: latestRateLimit }),
+    ...(options.completedHistoricalActivity === undefined
+      ? {}
+      : { completedHistoricalActivity: options.completedHistoricalActivity }),
+    ...(options.onHistoricalAccountCompleted === undefined
+      ? {}
+      : { onHistoricalAccountCompleted: options.onHistoricalAccountCompleted }),
   });
+  const { results } = historical;
+  latestRateLimit = historical.rateLimit;
   const analysis: ActivityAnalysis = {
     period,
     historyYears,

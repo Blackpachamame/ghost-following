@@ -43,10 +43,8 @@ import { GitHubGraphQLClient } from "./github/graphql.js";
 import type { Sleep } from "./github/retry.js";
 import { formatActivityReport, formatExportSummary } from "./report.js";
 
-export interface CliIO {
-  log(message: string): void;
-  error(message: string): void;
-}
+import { createProgressReporter, formatCliArgument, formatRateLimitLines, type CliIO } from "./utils/cli-presentation.js";
+export type { CliIO } from "./utils/cli-presentation.js";
 
 export const TOKEN_REQUIRED_MESSAGE = [
   "Activity analysis requires GITHUB_TOKEN.",
@@ -55,81 +53,12 @@ export const TOKEN_REQUIRED_MESSAGE = [
   "The token is never stored by this application.",
 ].join("\n");
 
-function formatDate(date: Date): string {
-  return Number.isNaN(date.getTime()) ? "unknown" : date.toISOString();
-}
-
-function formatPrimaryQuota(
-  error: GitHubRateLimitError,
-  scope: "API" | "GraphQL",
-): string | undefined {
-  if (error.remaining === undefined) {
-    return error.limit === undefined
-      ? undefined
-      : `Primary ${scope} quota limit: ${error.limit}`;
-  }
-  return `Primary ${scope} quota remaining: ${error.remaining}${
-    error.limit === undefined ? "" : ` / ${error.limit}`
-  }`;
-}
-
-function formatRateLimitLines(
-  error: GitHubRateLimitError,
-  scope: "API" | "GraphQL",
-  progressSaved: boolean,
-): string[] {
-  const lines: string[] = [];
-  if (error.kind === "PRIMARY") {
-    lines.push(`GitHub ${scope} primary rate limit exhausted.`);
-  } else if (error.kind === "SECONDARY") {
-    lines.push(`GitHub ${scope} secondary rate limit reached.`);
-  } else {
-    lines.push(
-      `GitHub ${scope} rate limit encountered.`,
-      "The response did not provide enough information to classify it as primary or secondary.",
-    );
-  }
-
-  if (progressSaved) lines.push("Progress saved.");
-
-  const quota = formatPrimaryQuota(error, scope);
-  if (quota !== undefined) lines.push(quota);
-
-  if (error.kind === "PRIMARY" && error.resetAt !== undefined) {
-    lines.push(`Primary limit resets at: ${formatDate(error.resetAt)}`);
-  } else if (error.resetAt !== undefined) {
-    lines.push(`Reported rate limit reset: ${formatDate(error.resetAt)}`);
-  }
-
-  if (error.retryAfterSeconds !== undefined) {
-    lines.push(
-      `GitHub requested a cooldown of ${error.retryAfterSeconds} seconds before retrying.`,
-    );
-  } else if (error.kind === "SECONDARY") {
-    lines.push(
-      "GitHub did not provide Retry-After.",
-      "Wait before resuming; GitHub recommends at least one minute for secondary rate limits when primary quota remains available.",
-    );
-  }
-
-  if (error.kind === "UNKNOWN") {
-    lines.push(`HTTP status: ${error.status}`);
-  }
-  return lines;
-}
-
 export interface SuggestedResumeCommandOptions {
   username: string;
   days: number;
   historyYears: number;
   jsonPath?: string;
   csvPath?: string;
-}
-
-function formatCliArgument(value: string): string {
-  if (/^[a-z\d_./:-]+$/i.test(value)) return value;
-  if (!value.includes("'")) return `'${value}'`;
-  return JSON.stringify(value);
 }
 
 export function formatSuggestedResumeCommand(
@@ -395,28 +324,6 @@ export async function runCli(
     io.error(error instanceof Error ? error.message : "An unexpected error occurred.");
     return 1;
   }
-}
-
-function createProgressReporter(
-  label: string,
-  total: number,
-  io: CliIO,
-  minimumStep: number,
-): (completed: number, actualTotal: number) => void {
-  if (total === 0) return () => undefined;
-  const step = Math.max(
-    minimumStep,
-    Math.ceil(total / (10 * minimumStep)) * minimumStep,
-  );
-  let next = step;
-  let last = -1;
-  return (completed, actualTotal) => {
-    if (completed < next && completed !== actualTotal) return;
-    if (completed === last) return;
-    io.log(`${label}: ${completed} / ${actualTotal}`);
-    last = completed;
-    while (next <= completed) next += step;
-  };
 }
 
 const entryPoint = process.argv[1];

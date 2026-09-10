@@ -209,7 +209,7 @@ function checkpointQueueKey(path: string): string {
 }
 
 function serializeCheckpointSnapshot(
-  checkpoint: AuditCheckpoint,
+  checkpoint: { updatedAt: string },
   now = new Date(),
 ): string {
   if (Number.isNaN(now.getTime())) {
@@ -297,7 +297,7 @@ export class CheckpointWriter {
     }
   }
 
-  save(checkpoint: AuditCheckpoint, now = new Date()): Promise<void> {
+  save(checkpoint: { updatedAt: string }, now = new Date()): Promise<void> {
     const snapshot = serializeCheckpointSnapshot(checkpoint, now);
     const operation = this.#queue.tail
       .catch(() => undefined)

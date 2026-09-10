@@ -209,6 +209,61 @@ Reports generados antes de esta corrección pueden contener el valor legacy `NO_
 
 > `Last visible activity` means the most recent contribution activity GitHub exposes to the viewer within the configured historical lookback. It does not prove that the user was inactive after that date.
 
+## Enriquecer un report existente con historical
+
+`enrich-history` reutiliza un report JSON recent ya terminado para consultar actividad histórica sólo de las cuentas `NO_RECENT_VISIBLE_ACTIVITY`. No vuelve a consultar following por REST ni ejecuta recent GraphQL. Conserva el período, las cuentas y el summary recent del source; una fecha histórica encontrada no cambia el status recent.
+
+Acepta únicamente el schema público 1 con `history.years = 0` y candidatos con historical `NOT_REQUESTED`. Valida el JSON antes de consultar GitHub. El source no se modifica: `--json` es obligatorio y debe apuntar a otro archivo; tampoco se permite usar el source como destino CSV. `--history-years` es obligatorio, de 1 a 5.
+
+Después de `npm run build`, para buscar hasta un año:
+
+```bash
+npm run enrich-history -- reports/audit.json --history-years 1 --json reports/audit-history-1y.json
+```
+
+Para cinco años con ambos exports:
+
+```bash
+npm run enrich-history -- reports/audit.json \
+  --history-years 5 \
+  --json reports/audit-history-5y.json \
+  --csv reports/audit-history-5y.csv
+```
+
+Cada ventana anual comienza antes del período recent guardado, no de la fecha actual. Usa el lookup histórico productivo: ventanas secuenciales por cuenta, hasta cuatro cuentas concurrentes y detención al primer `FOUND`. `hasActivityInThePast` no controla la selección. Un fallo individual produce `FAILED` y permite continuar con las demás cuentas.
+
+El progreso se guarda después de cada cuenta completada en un namespace separado:
+
+```text
+.ghost-following/history-enrichment/<username>-history.json
+```
+
+El checkpoint contiene un SHA-256 de los bytes originales del source, usuario, período, años solicitados, timestamps, resultados históricos completados y la última cuota GraphQL observada. No almacena el source completo, respuestas GraphQL, token ni rutas de exports. Las escrituras son atómicas y serializadas. Una ejecución sin `--resume` es fresca y reemplaza el checkpoint anterior de ese usuario.
+
+Para continuar:
+
+```bash
+npm run enrich-history -- reports/audit.json \
+  --history-years 5 \
+  --resume \
+  --json reports/audit-history-5y.json \
+  --csv reports/audit-history-5y.csv
+```
+
+Resume valida el fingerprint, usuario, período y años. Si se modificó el source, incluso su formato o espacios, o cambiaron los años solicitados, se rechaza antes de consultar GitHub. Las cuentas completadas, incluidas las que terminaron en `FAILED`, no se repiten; el progreso incluye las reutilizadas. Las rutas de export se indican nuevamente en la CLI y se conservan en el comando sugerido, con quoting para espacios y backslashes de Windows.
+
+Ante un rate limit primary, secondary o desconocido, guarda progreso, termina con código 1 y muestra el comando de resume junto a la cuota, reset y `Retry-After` disponibles. No espera automáticamente cooldowns largos. Los exports finales sólo se escriben al terminar historical; si hay una interrupción, los outputs anteriores se conservan. El checkpoint se elimina después de escribir JSON y CSV si fue solicitado; si falla un export, permanece para reintentar sin repetir historical.
+
+El JSON continúa en schema 1 y el CSV conserva sus columnas. El output actualiza `history.years`, los campos históricos de los candidatos y `generatedAt` al terminar el enrichment. Conserva la cuota REST del source y usa la última cuota GraphQL observada en historical; si no hubo consultas, conserva la anterior. Sin candidatos, o al reanudar un checkpoint completamente resuelto para exportar, no requiere token ni requests. Cuando queda trabajo pendiente requiere `GITHUB_TOKEN`.
+
+```bash
+npm run enrich-history -- --help
+```
+
+Esta primera versión no extiende historical previo, mantiene consultas por cuenta sin batching histórico y requiere resume manual después de un cooldown. Historical describe únicamente actividad visible para el token: `NOT_FOUND_IN_LOOKBACK` no demuestra inactividad absoluta.
+
+
+
 ## Coverage
 
 Coverage mide qué proporción de las cuentas `User` elegibles obtuvo una clasificación evaluable:
